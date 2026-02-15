@@ -1,0 +1,34 @@
+# Fishing Planet Vibration Fix — Configuration
+# =============================================
+#
+# Values are 0-100 (percentage of motor strength).
+# Edit and save — changes apply on next game restart.
+#
+# Controller motors:
+#   left_motor    = low-frequency, heavy rumble (the "thump")
+#   right_motor   = high-frequency, light buzz (the "whirr")
+#   left_trigger  = left trigger vibration (Xbox Elite / DualSense only)
+#   right_trigger = right trigger vibration (Xbox Elite / DualSense only)
+
+# --- Bite (fish strikes the hook) ---
+# Strong thump to simulate the fish hitting
+bite_left_motor = 100
+bite_right_motor = 50
+bite_left_trigger = 40
+bite_right_trigger = 50
+
+# Double-tap effect: two quick hits instead of one (true/false)
+bite_double_tap = true
+# Second hit strength relative to first (0-100)
+bite_double_tap_strength = 75
+
+# --- Reeling (pulling the fish in) ---
+# Buzzy feel to simulate the reel working
+reel_left_motor = 45
+reel_right_motor = 100
+reel_left_trigger = 30
+reel_right_trigger = 50
+
+# --- General ---
+# Short test vibration when game starts (true/false)
+test_on_start = true

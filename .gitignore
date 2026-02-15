@@ -1,0 +1,7 @@
+*.dylib
+*.log
+launcher
+*.o
+.DS_Store
+vibration_helper
+vibration_helper.m
