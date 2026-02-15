@@ -16,7 +16,7 @@ Enables Xbox controller vibration in Fishing Planet on macOS. The game has built
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/fishing-planet-vibfix.git
+git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
 cd fishing-planet-vibfix
 
 chmod +x install.sh uninstall.sh
@@ -156,7 +156,7 @@ MIT
 ## Установка
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/fishing-planet-vibfix.git
+git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
 cd fishing-planet-vibfix
 
 chmod +x install.sh uninstall.sh
