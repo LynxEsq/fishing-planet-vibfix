@@ -19,10 +19,24 @@ if [ ! -d "$GAME_APP" ]; then
     exit 1
 fi
 
-# Build if needed
-if [ ! -f "$SCRIPT_DIR/vibration_fix.dylib" ] || [ ! -f "$SCRIPT_DIR/launcher" ]; then
-    echo "Building..."
+# Find dylib and launcher — prefer pre-built from build/, fall back to local, then compile
+DYLIB=""
+LAUNCHER=""
+
+if [ -f "$SCRIPT_DIR/build/vibration_fix.dylib" ] && [ -f "$SCRIPT_DIR/build/launcher" ]; then
+    echo "Using pre-built binaries from build/"
+    DYLIB="$SCRIPT_DIR/build/vibration_fix.dylib"
+    LAUNCHER="$SCRIPT_DIR/build/launcher"
+elif [ -f "$SCRIPT_DIR/vibration_fix.dylib" ] && [ -f "$SCRIPT_DIR/launcher" ]; then
+    echo "Using locally built binaries"
+    DYLIB="$SCRIPT_DIR/vibration_fix.dylib"
+    LAUNCHER="$SCRIPT_DIR/launcher"
+else
+    echo "No pre-built binaries found. Building from source..."
+    echo "(requires Xcode Command Line Tools: xcode-select --install)"
     make -C "$SCRIPT_DIR" all
+    DYLIB="$SCRIPT_DIR/vibration_fix.dylib"
+    LAUNCHER="$SCRIPT_DIR/launcher"
 fi
 
 # Backup original binary (only if not already done)
@@ -36,13 +50,17 @@ fi
 
 # Install launcher
 echo "Installing launcher..."
-cp "$SCRIPT_DIR/launcher" "$GAME_BIN"
+cp "$LAUNCHER" "$GAME_BIN"
 chmod +x "$GAME_BIN"
 
-# Copy config if it doesn't exist yet in install dir
-if [ ! -f "$SCRIPT_DIR/config.txt" ]; then
-    echo "WARNING: config.txt not found — using built-in defaults."
+# Ensure dylib is in project root
+if [ "$DYLIB" != "$SCRIPT_DIR/vibration_fix.dylib" ]; then
+    cp "$DYLIB" "$SCRIPT_DIR/vibration_fix.dylib"
 fi
+
+# Write dylib path for the launcher to find
+echo "$SCRIPT_DIR/vibration_fix.dylib" > "$GAME_MACOS/.vibfix_dylib_path"
+echo "Wrote dylib path: $SCRIPT_DIR/vibration_fix.dylib"
 
 echo ""
 echo "=== Installation complete ==="
@@ -50,13 +68,20 @@ echo ""
 echo "Files:"
 echo "  Dylib:    $SCRIPT_DIR/vibration_fix.dylib"
 echo "  Config:   $SCRIPT_DIR/config.txt"
-echo "  Log:      $SCRIPT_DIR/vibfix.log"
+echo "  Log:      $SCRIPT_DIR/vibfix.log (created on game launch)"
 echo "  Launcher: $GAME_BIN"
 echo "  Backup:   $REAL_BIN"
 echo ""
-echo "IMPORTANT: Enable Steam Input for the game:"
-echo "  Steam > Fishing Planet > Properties > Controller"
-echo "  Set to 'Enable Steam Input' or 'Use default settings'"
+echo "IMPORTANT — next steps:"
+echo ""
+echo "  1. Enable Steam Input:"
+echo "     Steam > Fishing Planet > Properties > Controller > Enable Steam Input"
+echo ""
+echo "  2. Reset Input Monitoring permission:"
+echo "     System Settings > Privacy & Security > Input Monitoring"
+echo "     Remove FishingPlanet, then re-launch — macOS will ask again."
+echo ""
+echo "  3. Launch the game. A short test vibration = it works!"
 echo ""
 echo "Edit config.txt to customize vibration strength."
 echo "Changes apply on next game restart."

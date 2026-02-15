@@ -29,8 +29,30 @@ int main(int argc, char *argv[]) {
     char real_binary[4096];
     snprintf(real_binary, sizeof(real_binary), "%s/FishingPlanet_real", dir);
 
-    // Dylib path — use /tmp to avoid invalidating the app bundle signature
-    const char *dylib_path = "/tmp/vibration_fix/vibration_fix.dylib";
+    // Read dylib path from .vibfix_dylib_path (written by install.sh)
+    char config_path[4096];
+    snprintf(config_path, sizeof(config_path), "%s/.vibfix_dylib_path", dir);
+
+    char dylib_path[4096] = {0};
+    FILE *f = fopen(config_path, "r");
+    if (f) {
+        if (fgets(dylib_path, sizeof(dylib_path), f)) {
+            // Strip trailing newline
+            size_t len = strlen(dylib_path);
+            while (len > 0 && (dylib_path[len-1] == '\n' || dylib_path[len-1] == '\r'))
+                dylib_path[--len] = '\0';
+        }
+        fclose(f);
+    }
+
+    if (dylib_path[0] == '\0') {
+        fprintf(stderr, "[VibFix Launcher] Config not found: %s\n", config_path);
+        fprintf(stderr, "[VibFix Launcher] Launching without vibration fix\n");
+        argv[0] = real_binary;
+        execv(real_binary, argv);
+        perror("execv");
+        return 1;
+    }
 
     // Check files exist
     if (access(real_binary, X_OK) != 0) {
@@ -39,7 +61,6 @@ int main(int argc, char *argv[]) {
     }
     if (access(dylib_path, R_OK) != 0) {
         fprintf(stderr, "[VibFix Launcher] Dylib not found: %s\n", dylib_path);
-        // Continue without the fix
         fprintf(stderr, "[VibFix Launcher] Launching without vibration fix\n");
         argv[0] = real_binary;
         execv(real_binary, argv);

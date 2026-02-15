@@ -11,9 +11,10 @@ Enables Xbox controller vibration in Fishing Planet on macOS. The game has built
 - macOS 13+ (Apple Silicon)
 - Fishing Planet via Steam
 - Xbox controller connected via Bluetooth
-- Xcode Command Line Tools (`xcode-select --install`)
 
 ## Installation
+
+Pre-built binaries are included — no compilation needed.
 
 ```bash
 git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
@@ -22,6 +23,8 @@ cd fishing-planet-vibfix
 chmod +x install.sh uninstall.sh
 ./install.sh
 ```
+
+The installer uses pre-built binaries from `build/`. If they're missing, it will compile from source automatically (requires Xcode Command Line Tools).
 
 ### Enable Steam Input (required)
 
@@ -104,6 +107,27 @@ The installer backs up the new binary and re-installs the launcher wrapper.
 
 Restores the original game binary. Config and dylib are not deleted.
 
+## Building from source
+
+If you want to compile the binaries yourself instead of using the pre-built ones:
+
+```bash
+# Install Xcode Command Line Tools (if not already installed)
+xcode-select --install
+
+# Build and copy to build/
+chmod +x build.sh
+./build.sh
+```
+
+Or use `make` directly:
+
+```bash
+make all
+```
+
+After building, run `./install.sh` as usual — it will pick up the freshly compiled binaries.
+
 ## How it works
 
 1. A launcher wrapper sets `DYLD_INSERT_LIBRARIES` to inject the fix into the game process
@@ -128,11 +152,13 @@ CoreHaptics doesn't work while Unity holds the HID device, so Steam Input is the
 
 | File | Description |
 |------|-------------|
-| `vibration_fix.m` | Main dylib — IL2CPP hooks + Steam Input API |
-| `launcher.c` | Wrapper binary that injects the dylib |
+| `build/` | Pre-built binaries (ready to use) |
+| `vibration_fix.m` | Main dylib source — IL2CPP hooks + Steam Input API |
+| `launcher.c` | Wrapper binary source |
 | `config.txt` | Vibration settings (user-editable) |
-| `install.sh` | Build & install script |
+| `install.sh` | Install script |
 | `uninstall.sh` | Restore original game binary |
+| `build.sh` | Build from source script |
 | `Makefile` | Build rules |
 
 ## License
@@ -151,9 +177,10 @@ MIT
 - macOS 13+ (Apple Silicon)
 - Fishing Planet через Steam
 - Xbox-контроллер по Bluetooth
-- Xcode Command Line Tools (`xcode-select --install`)
 
 ## Установка
+
+Собранные бинарники уже включены — компиляция не нужна.
 
 ```bash
 git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
@@ -162,6 +189,8 @@ cd fishing-planet-vibfix
 chmod +x install.sh uninstall.sh
 ./install.sh
 ```
+
+Установщик использует готовые бинарники из `build/`. Если их нет — скомпилирует из исходников автоматически (нужны Xcode Command Line Tools).
 
 ### Включить Steam Input (обязательно)
 
@@ -243,6 +272,27 @@ test_on_start = true
 ```
 
 Восстанавливает оригинальный бинарник игры. Конфиг и dylib не удаляются.
+
+## Сборка из исходников
+
+Если хотите скомпилировать бинарники самостоятельно:
+
+```bash
+# Установить Xcode Command Line Tools (если ещё не установлены)
+xcode-select --install
+
+# Собрать и скопировать в build/
+chmod +x build.sh
+./build.sh
+```
+
+Или напрямую через `make`:
+
+```bash
+make all
+```
+
+После сборки запустите `./install.sh` как обычно — он подхватит свежие бинарники.
 
 ## Как это работает
 
