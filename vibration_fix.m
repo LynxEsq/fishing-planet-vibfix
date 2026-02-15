@@ -2,11 +2,11 @@
 //
 // Hooks Unity's IL2CPP runtime via DYLD_INSERT_LIBRARIES to intercept vibration
 // commands (IOCTL RMBL) and redirect them through Steam's Input API.
-// CoreHaptics doesn't work while Unity holds the HID device, but Steam Input
-// can vibrate the controller because Steam manages it at a higher level.
+// Falls back to direct IOKit HID rumble if Steam Input is unavailable.
 
 #import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
+#import <IOKit/hid/IOHIDManager.h>
 #import <dlfcn.h>
 #include <string.h>
 #include <stdint.h>
@@ -21,7 +21,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 
-#define VERSION "7.0"
+#define VERSION "8.0"
 
 // Forward declarations
 static void initControllerMonitoring(void);
@@ -221,6 +221,14 @@ static float g_curLow = -1.0f;
 static float g_curHigh = -1.0f;
 static int g_steamReady = 0;  // 0=not tried, 1=ready, -1=failed
 
+// Steam diagnostic helpers
+typedef int32_t HSteamPipe;
+typedef int32_t HSteamUser;
+typedef HSteamPipe (*GetHSteamPipe_fn)(void);
+typedef HSteamUser (*GetHSteamUser_fn)(void);
+static GetHSteamPipe_fn api_GetHSteamPipe = NULL;
+static GetHSteamUser_fn api_GetHSteamUser = NULL;
+
 static void initSteamInput(void) {
     if (g_steamReady != 0) return;
 
@@ -241,6 +249,12 @@ static void initSteamInput(void) {
         return;
     }
 
+    // Get diagnostic functions
+    if (!api_GetHSteamPipe)
+        api_GetHSteamPipe = (GetHSteamPipe_fn)dlsym(steam, "SteamAPI_GetHSteamPipe");
+    if (!api_GetHSteamUser)
+        api_GetHSteamUser = (GetHSteamUser_fn)dlsym(steam, "SteamAPI_GetHSteamUser");
+
     api_SteamInput = (SteamInput_fn)dlsym(steam, "SteamAPI_SteamInput_v006");
     api_SteamInputInit = (SteamInputInit_fn)dlsym(steam, "SteamAPI_ISteamInput_Init");
     api_SteamInputRunFrame = (SteamInputRunFrame_fn)dlsym(steam, "SteamAPI_ISteamInput_RunFrame");
@@ -254,9 +268,19 @@ static void initSteamInput(void) {
         return;
     }
 
+    // Diagnostic: check if Steam API is initialized
+    int32_t pipe = api_GetHSteamPipe ? api_GetHSteamPipe() : -1;
+    int32_t user = api_GetHSteamUser ? api_GetHSteamUser() : -1;
+    viblog("Steam: pipe=%d user=%d", pipe, user);
+
+    if (pipe == 0 || user == 0) {
+        viblog("Steam: API not initialized yet — will retry");
+        return;
+    }
+
     g_steamInput = api_SteamInput();
     if (!g_steamInput) {
-        viblog("Steam: SteamInput() returned NULL — will retry");
+        viblog("Steam: SteamInput() returned NULL (pipe=%d user=%d) — will retry", pipe, user);
         return;
     }
 
@@ -276,39 +300,163 @@ static void initSteamInput(void) {
         g_controllerHandle = handles[0];
         g_steamReady = 1;
         viblog("Steam: using controller 0x%llx", (unsigned long long)g_controllerHandle);
-
-        if (g_cfg.test_on_start) {
-            viblog("Steam: test vibration");
-            unsigned short tL = (unsigned short)(g_cfg.bite_left * 0.6f * 65535.0f);
-            unsigned short tR = (unsigned short)(g_cfg.bite_right * 0.6f * 65535.0f);
-            unsigned short tLT = (unsigned short)(g_cfg.bite_trigger_left * 0.6f * 65535.0f);
-            unsigned short tRT = (unsigned short)(g_cfg.bite_trigger_right * 0.6f * 65535.0f);
-            if (api_TriggerVibrationExt)
-                api_TriggerVibrationExt(g_steamInput, g_controllerHandle, tL, tR, tLT, tRT);
-            else
-                api_TriggerVibration(g_steamInput, g_controllerHandle, tL, tR);
-            usleep(150000);
-            if (api_TriggerVibrationExt)
-                api_TriggerVibrationExt(g_steamInput, g_controllerHandle, 0, 0, 0, 0);
-            else
-                api_TriggerVibration(g_steamInput, g_controllerHandle, 0, 0);
-            usleep(80000);
-            // Second hit
-            unsigned short t2L = (unsigned short)(tL * g_cfg.bite_double_tap_strength);
-            unsigned short t2R = (unsigned short)(tR * g_cfg.bite_double_tap_strength);
-            if (api_TriggerVibrationExt)
-                api_TriggerVibrationExt(g_steamInput, g_controllerHandle, t2L, t2R, tLT, tRT);
-            else
-                api_TriggerVibration(g_steamInput, g_controllerHandle, t2L, t2R);
-            usleep(200000);
-            if (api_TriggerVibrationExt)
-                api_TriggerVibrationExt(g_steamInput, g_controllerHandle, 0, 0, 0, 0);
-            else
-                api_TriggerVibration(g_steamInput, g_controllerHandle, 0, 0);
-            viblog("Steam: test done");
-        }
     } else {
         viblog("Steam: no controllers — will retry");
+    }
+}
+
+// ============ IOKit HID Fallback ============
+
+static IOHIDDeviceRef g_xbox_hid = NULL;
+static int g_hid_ready = 0;
+
+// Xbox controller Product IDs (all use Vendor ID 0x045E)
+static const int g_xbox_pids[] = {
+    0x0B13, // Xbox Series X|S
+    0x0B20, // Xbox Series X|S (newer fw)
+    0x0B21, // Xbox Adaptive Controller
+    0x0B22, // Xbox Elite Series 2 (newer fw)
+    0x02E0, // Xbox One S
+    0x02FD, // Xbox One S (newer fw)
+    0x0B05, // Xbox Elite Series 2
+    0x0B12, // Xbox Core (2021+)
+    0
+};
+
+static int is_xbox_pid(int pid) {
+    for (int i = 0; g_xbox_pids[i]; i++)
+        if (g_xbox_pids[i] == pid) return 1;
+    return 0;
+}
+
+static void xbox_hid_matched(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef device) {
+    if (g_hid_ready) return;
+
+    CFNumberRef pidRef = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductIDKey));
+    int32_t pid = 0;
+    if (pidRef) CFNumberGetValue(pidRef, kCFNumberSInt32Type, &pid);
+
+    CFStringRef nameRef = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
+    char name[128] = "unknown";
+    if (nameRef) CFStringGetCString(nameRef, name, sizeof(name), kCFStringEncodingUTF8);
+
+    viblog("HID: device matched VID=045E PID=%04X '%s'", pid, name);
+
+    if (is_xbox_pid(pid)) {
+        g_xbox_hid = device;
+        CFRetain(device);
+        g_hid_ready = 1;
+        viblog("HID: Xbox controller ready (PID=0x%04X)", pid);
+    }
+}
+
+static void xbox_hid_removed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef device) {
+    if (device == g_xbox_hid) {
+        viblog("HID: Xbox controller disconnected");
+        g_hid_ready = 0;
+        CFRelease(g_xbox_hid);
+        g_xbox_hid = NULL;
+    }
+}
+
+static void *hid_thread(void *arg) {
+    viblog("HID: starting fallback controller search...");
+    IOHIDManagerRef mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    if (!mgr) { viblog("HID: IOHIDManagerCreate failed"); return NULL; }
+
+    int vid = 0x045E;
+    CFNumberRef vidNum = CFNumberCreate(NULL, kCFNumberIntType, &vid);
+    CFStringRef keys[] = { CFSTR(kIOHIDVendorIDKey) };
+    CFTypeRef vals[] = { vidNum };
+    CFDictionaryRef match = CFDictionaryCreate(NULL, (const void **)keys, (const void **)vals,
+                                                1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    IOHIDManagerSetDeviceMatching(mgr, match);
+    CFRelease(match);
+    CFRelease(vidNum);
+
+    IOHIDManagerRegisterDeviceMatchingCallback(mgr, xbox_hid_matched, NULL);
+    IOHIDManagerRegisterDeviceRemovalCallback(mgr, xbox_hid_removed, NULL);
+    IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
+
+    CFRunLoopRun();
+    return NULL;
+}
+
+static void send_hid_rumble(uint8_t lt, uint8_t rt, uint8_t left, uint8_t right) {
+    if (!g_hid_ready || !g_xbox_hid) return;
+    // Xbox One Bluetooth HID rumble report: ID=0x03, 9 bytes
+    uint8_t report[9] = {0x03, 0x0F, lt, rt, left, right, 0xFF, 0x00, 0xEB};
+    IOReturn ret = IOHIDDeviceSetReport(g_xbox_hid, kIOHIDReportTypeOutput, 0x03, report, sizeof(report));
+    if (ret != kIOReturnSuccess) {
+        static int errcnt = 0;
+        if (++errcnt <= 5) viblog("HID: SetReport error 0x%x", ret);
+    }
+}
+
+// ============ Test Vibration ============
+
+static void do_test_vibration(void) {
+    if (!g_cfg.test_on_start) return;
+    viblog("Test vibration...");
+
+    uint8_t tL  = (uint8_t)(g_cfg.bite_left * 0.6f * 100.0f);
+    uint8_t tR  = (uint8_t)(g_cfg.bite_right * 0.6f * 100.0f);
+    uint8_t tLT = (uint8_t)(g_cfg.bite_trigger_left * 0.6f * 100.0f);
+    uint8_t tRT = (uint8_t)(g_cfg.bite_trigger_right * 0.6f * 100.0f);
+
+    if (g_steamReady == 1) {
+        unsigned short sL = tL * 655, sR = tR * 655, sLT = tLT * 655, sRT = tRT * 655;
+        if (api_TriggerVibrationExt)
+            api_TriggerVibrationExt(g_steamInput, g_controllerHandle, sL, sR, sLT, sRT);
+        else
+            api_TriggerVibration(g_steamInput, g_controllerHandle, sL, sR);
+        usleep(150000);
+        if (api_TriggerVibrationExt)
+            api_TriggerVibrationExt(g_steamInput, g_controllerHandle, 0, 0, 0, 0);
+        else
+            api_TriggerVibration(g_steamInput, g_controllerHandle, 0, 0);
+        usleep(80000);
+        unsigned short s2L = (unsigned short)(sL * g_cfg.bite_double_tap_strength);
+        unsigned short s2R = (unsigned short)(sR * g_cfg.bite_double_tap_strength);
+        if (api_TriggerVibrationExt)
+            api_TriggerVibrationExt(g_steamInput, g_controllerHandle, s2L, s2R, sLT, sRT);
+        else
+            api_TriggerVibration(g_steamInput, g_controllerHandle, s2L, s2R);
+        usleep(200000);
+        if (api_TriggerVibrationExt)
+            api_TriggerVibrationExt(g_steamInput, g_controllerHandle, 0, 0, 0, 0);
+        else
+            api_TriggerVibration(g_steamInput, g_controllerHandle, 0, 0);
+        viblog("Test done (Steam Input)");
+    } else if (g_hid_ready) {
+        send_hid_rumble(tLT, tRT, tL, tR);
+        usleep(150000);
+        send_hid_rumble(0, 0, 0, 0);
+        usleep(80000);
+        uint8_t t2L = (uint8_t)(tL * g_cfg.bite_double_tap_strength);
+        uint8_t t2R = (uint8_t)(tR * g_cfg.bite_double_tap_strength);
+        send_hid_rumble(tLT, tRT, t2L, t2R);
+        usleep(200000);
+        send_hid_rumble(0, 0, 0, 0);
+        viblog("Test done (HID fallback)");
+    } else {
+        viblog("Test: no output available (Steam=%d HID=%d)", g_steamReady, g_hid_ready);
+    }
+}
+
+// ============ Rumble Output (Steam or HID) ============
+
+static void outputRumble(uint8_t left, uint8_t right, uint8_t lt, uint8_t rt) {
+    if (g_steamReady == 1 && g_controllerHandle != 0) {
+        unsigned short sL = left * 655, sR = right * 655;
+        unsigned short sLT = lt * 655, sRT = rt * 655;
+        if (api_TriggerVibrationExt)
+            api_TriggerVibrationExt(g_steamInput, g_controllerHandle, sL, sR, sLT, sRT);
+        else
+            api_TriggerVibration(g_steamInput, g_controllerHandle, sL, sR);
+    } else if (g_hid_ready) {
+        send_hid_rumble(lt, rt, left, right);
     }
 }
 
@@ -320,81 +468,74 @@ static void sendRumble(float lowFreq, float highFreq) {
     if (lowFreq == g_curLow && highFreq == g_curHigh) return;
     g_curLow = lowFreq; g_curHigh = highFreq;
 
-    if (g_steamReady <= 0) {
+    // Try to init output if not ready
+    if (g_steamReady <= 0 && !g_hid_ready) {
         initSteamInput();
-        if (g_steamReady != 1) return;
+        if (g_steamReady != 1 && !g_hid_ready) return;
     }
 
-    if (g_controllerHandle == 0 && api_GetControllers && g_steamInput) {
+    // Steam: refresh controller handle if needed
+    if (g_steamReady == 1 && g_controllerHandle == 0 && api_GetControllers && g_steamInput) {
         if (api_SteamInputRunFrame) api_SteamInputRunFrame(g_steamInput);
         InputHandle_t handles[16] = {0};
         int n = api_GetControllers(g_steamInput, handles);
         if (n > 0) {
             g_controllerHandle = handles[0];
             viblog("Steam: controller found on retry: 0x%llx", (unsigned long long)g_controllerHandle);
-        } else return;
+        }
     }
 
-    unsigned short L, R, LT = 0, RT = 0;
+    // Check we have at least one output
+    int have_steam = (g_steamReady == 1 && g_controllerHandle != 0);
+    int have_hid = g_hid_ready;
+    if (!have_steam && !have_hid) return;
+
+    uint8_t mL = 0, mR = 0, mLT = 0, mRT = 0;
     const char *event = "unknown";
 
     if (lowFreq < 0.001f && highFreq < 0.001f) {
-        L = 0; R = 0; LT = 0; RT = 0;
         event = "stop";
     } else if (lowFreq > 0.30f) {
         // BITE
         float str = lowFreq;
-        L  = (unsigned short)(str * g_cfg.bite_left * 65535.0f);
-        R  = (unsigned short)(str * g_cfg.bite_right * 65535.0f);
-        LT = (unsigned short)(str * g_cfg.bite_trigger_left * 65535.0f);
-        RT = (unsigned short)(str * g_cfg.bite_trigger_right * 65535.0f);
+        mL  = (uint8_t)(str * g_cfg.bite_left * 100.0f);
+        mR  = (uint8_t)(str * g_cfg.bite_right * 100.0f);
+        mLT = (uint8_t)(str * g_cfg.bite_trigger_left * 100.0f);
+        mRT = (uint8_t)(str * g_cfg.bite_trigger_right * 100.0f);
         event = "BITE";
 
         if (g_cfg.bite_double_tap) {
             float dbl = g_cfg.bite_double_tap_strength;
+            uint8_t d2L = (uint8_t)(mL * dbl);
+            uint8_t d2R = (uint8_t)(mR * dbl);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC),
                            dispatch_get_main_queue(), ^{
-                if (g_steamReady != 1 || g_controllerHandle == 0) return;
-                if (api_TriggerVibrationExt)
-                    api_TriggerVibrationExt(g_steamInput, g_controllerHandle, 0, 0, 0, 0);
-                else
-                    api_TriggerVibration(g_steamInput, g_controllerHandle, 0, 0);
-
+                outputRumble(0, 0, 0, 0);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC),
                                dispatch_get_main_queue(), ^{
-                    if (g_steamReady != 1 || g_controllerHandle == 0) return;
                     if (g_curLow < 0.1f) return;
-                    unsigned short l2 = (unsigned short)(str * g_cfg.bite_left * dbl * 65535.0f);
-                    unsigned short r2 = (unsigned short)(str * g_cfg.bite_right * dbl * 65535.0f);
-                    unsigned short lt2 = (unsigned short)(str * g_cfg.bite_trigger_left * dbl * 65535.0f);
-                    unsigned short rt2 = (unsigned short)(str * g_cfg.bite_trigger_right * dbl * 65535.0f);
-                    viblog("  double-tap: L=%u R=%u LT=%u RT=%u", l2, r2, lt2, rt2);
-                    if (api_TriggerVibrationExt)
-                        api_TriggerVibrationExt(g_steamInput, g_controllerHandle, l2, r2, lt2, rt2);
-                    else
-                        api_TriggerVibration(g_steamInput, g_controllerHandle, l2, r2);
+                    viblog("  double-tap: L=%u R=%u LT=%u RT=%u", d2L, d2R, mLT, mRT);
+                    outputRumble(d2L, d2R, mLT, mRT);
                 });
             });
         }
     } else {
         // REEL
         float str = lowFreq;
-        L  = (unsigned short)(str * g_cfg.reel_left * 65535.0f);
-        R  = (unsigned short)(str * g_cfg.reel_right * 65535.0f);
-        LT = (unsigned short)(str * g_cfg.reel_trigger_left * 65535.0f);
-        RT = (unsigned short)(str * g_cfg.reel_trigger_right * 65535.0f);
+        mL  = (uint8_t)(str * g_cfg.reel_left * 100.0f);
+        mR  = (uint8_t)(str * g_cfg.reel_right * 100.0f);
+        mLT = (uint8_t)(str * g_cfg.reel_trigger_left * 100.0f);
+        mRT = (uint8_t)(str * g_cfg.reel_trigger_right * 100.0f);
         event = "REEL";
     }
 
-    if (api_TriggerVibrationExt)
-        api_TriggerVibrationExt(g_steamInput, g_controllerHandle, L, R, LT, RT);
-    else
-        api_TriggerVibration(g_steamInput, g_controllerHandle, L, R);
+    outputRumble(mL, mR, mLT, mRT);
 
+    const char *via = have_steam ? "Steam" : "HID";
     static int n = 0;
     if (++n <= 30 || n % 100 == 0)
-        viblog("rumble #%d [%s]: L=%u R=%u LT=%u RT=%u (src=%.3f/%.3f)",
-               n, event, L, R, LT, RT, lowFreq, highFreq);
+        viblog("rumble #%d [%s via %s]: L=%u R=%u LT=%u RT=%u (src=%.3f/%.3f)",
+               n, event, via, mL, mR, mLT, mRT, lowFreq, highFreq);
 }
 
 // ============ Unity Hook Functions ============
@@ -410,6 +551,17 @@ static int hook_supports_vibration(void) {
 }
 
 static int64_t hook_ioctl(int32_t deviceId, int32_t type, void *buffer, int32_t size) {
+    // Log ALL IOCTL types for debugging (first 10 of each type)
+    static int ioctl_count = 0;
+    if (++ioctl_count <= 10 || ioctl_count % 500 == 0) {
+        char fourcc[5] = {0};
+        fourcc[0] = (type >> 24) & 0xFF;
+        fourcc[1] = (type >> 16) & 0xFF;
+        fourcc[2] = (type >> 8) & 0xFF;
+        fourcc[3] = type & 0xFF;
+        viblog("IOCTL #%d: type=0x%08X '%s' dev=%d size=%d", ioctl_count, type, fourcc, deviceId, size);
+    }
+
     if (type == RMBL_FOURCC && buffer) {
         float low = 0, high = 0;
         if (size >= 16) {
@@ -616,8 +768,13 @@ static void *init_thread(void *arg) {
                 initControllerMonitoring();
             });
 
-            // Pre-init Steam Input with retries
-            for (int retry = 0; retry < 10; retry++) {
+            // Start HID fallback thread immediately
+            pthread_t hid_t;
+            pthread_create(&hid_t, NULL, hid_thread, NULL);
+            pthread_detach(hid_t);
+
+            // Pre-init Steam Input with retries (60 attempts = 30 seconds)
+            for (int retry = 0; retry < 60; retry++) {
                 usleep(500000);
                 g_steamReady = 0;
                 initSteamInput();
@@ -625,7 +782,20 @@ static void *init_thread(void *arg) {
                     viblog("Steam Input ready (attempt %d)", retry + 1);
                     break;
                 }
+                // If HID fallback is already working, stop retrying Steam
+                if (g_hid_ready && retry >= 10) {
+                    viblog("Steam Input unavailable, using HID fallback");
+                    break;
+                }
             }
+
+            // Test vibration with whatever output is available
+            if (g_steamReady == 1 || g_hid_ready) {
+                do_test_vibration();
+            } else {
+                viblog("WARNING: no vibration output available (Steam=%d HID=%d)", g_steamReady, g_hid_ready);
+            }
+
             return NULL;
         }
     }

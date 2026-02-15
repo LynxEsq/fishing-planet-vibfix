@@ -1,6 +1,6 @@
 # Fishing Planet — Xbox Controller Vibration Fix (macOS)
 
-Enables Xbox controller vibration in Fishing Planet on macOS. The game has built-in vibration support but Unity disables it on macOS. This mod hooks into Unity's runtime and redirects vibration commands through Steam's Input API.
+Enables Xbox controller vibration in Fishing Planet on macOS. The game has built-in vibration support but Unity disables it on macOS. This mod hooks into Unity's runtime and redirects vibration commands through Steam Input API, with automatic fallback to direct IOKit HID if Steam Input is unavailable.
 
 **[Русская версия ниже / Russian version below](#ru)**
 
@@ -134,9 +134,11 @@ After building, run `./install.sh` as usual — it will pick up the freshly comp
 2. The fix hooks Unity's IL2CPP runtime:
    - Forces `SystemInfo.supportsVibration` to return `true`
    - Intercepts `NativeInputSystem.IOCTL` to capture vibration commands
-3. Vibration commands are sent to the controller via Steam Input API
+3. Vibration output (dual path):
+   - **Steam Input API** — primary method, uses Steam's controller subsystem
+   - **IOKit HID** — automatic fallback, sends Xbox Bluetooth HID rumble reports directly
 
-CoreHaptics doesn't work while Unity holds the HID device, so Steam Input is the only viable approach on macOS.
+Both paths are tried during startup. Steam Input is preferred when available; HID fallback activates instantly if Steam Input is unavailable.
 
 ## Troubleshooting
 
@@ -153,13 +155,29 @@ CoreHaptics doesn't work while Unity holds the HID device, so Steam Input is the
 | File | Description |
 |------|-------------|
 | `build/` | Pre-built binaries (ready to use) |
-| `vibration_fix.m` | Main dylib source — IL2CPP hooks + Steam Input API |
+| `vibration_fix.m` | Main dylib source — IL2CPP hooks + Steam Input / HID output |
 | `launcher.c` | Wrapper binary source |
 | `config.txt` | Vibration settings (user-editable) |
 | `install.sh` | Install script |
 | `uninstall.sh` | Restore original game binary |
 | `build.sh` | Build from source script |
 | `Makefile` | Build rules |
+
+## Changelog
+
+### v8.0
+- **IOKit HID fallback**: if Steam Input is unavailable, vibration now works via direct Xbox Bluetooth HID reports (same approach as [GRID Autosport vibfix](https://github.com/LynxEsq/grid-autosport-vibfix))
+- **Fixed Steam Input initialization**: added `SteamAPI_GetHSteamPipe/User` checks to avoid calling `SteamInput()` before Steam API is ready — this was the root cause of the "SteamInput() returned NULL" issue in v7.0
+- **Extended Steam Input retries**: 60 attempts (30 seconds) instead of 10 (5 seconds)
+- **IOCTL diagnostic logging**: all Unity IOCTL types are now logged (first 10 + periodic), not just RMBL — helps debug if game stops sending vibration commands
+- **Unified rumble output**: `outputRumble()` abstraction routes vibration to whichever backend is available (Steam Input or HID)
+
+### v7.0
+- Initial public release
+- IL2CPP hooks for `SupportsVibration` and `IOCTL`
+- Steam Input API for vibration output
+- Configurable bite/reel motor strengths
+- Double-tap bite effect
 
 ## License
 
@@ -170,7 +188,7 @@ MIT
 <a name="ru"></a>
 # Fishing Planet — Фикс вибрации Xbox-контроллера (macOS)
 
-Включает вибрацию Xbox-контроллера в Fishing Planet на macOS. В игре есть встроенная поддержка вибрации, но Unity отключает её на macOS. Этот мод перехватывает команды вибрации и перенаправляет их через Steam Input API.
+Включает вибрацию Xbox-контроллера в Fishing Planet на macOS. В игре есть встроенная поддержка вибрации, но Unity отключает её на macOS. Этот мод перехватывает команды вибрации и перенаправляет их через Steam Input API с автоматическим фоллбеком на прямой IOKit HID, если Steam Input недоступен.
 
 ## Требования
 
@@ -300,9 +318,11 @@ make all
 2. Фикс хукает IL2CPP-рантайм Unity:
    - Заставляет `SystemInfo.supportsVibration` возвращать `true`
    - Перехватывает `NativeInputSystem.IOCTL` для захвата команд вибрации
-3. Команды вибрации отправляются на контроллер через Steam Input API
+3. Вывод вибрации (два пути):
+   - **Steam Input API** — основной метод, использует подсистему контроллеров Steam
+   - **IOKit HID** — автоматический фоллбек, отправляет Xbox Bluetooth HID-репорты напрямую
 
-CoreHaptics не работает пока Unity держит HID-устройство, поэтому Steam Input — единственный рабочий подход на macOS.
+Оба пути проверяются при запуске. Steam Input используется если доступен; HID-фоллбек активируется мгновенно если Steam Input недоступен.
 
 ## Решение проблем
 
@@ -313,3 +333,19 @@ CoreHaptics не работает пока Unity держит HID-устройс
 | Игра падает при запуске | Запустите `./uninstall.sh`, затем `./install.sh`. Сбросьте разрешение «Мониторинг ввода». |
 | Вибрация ощущается неправильно | Отредактируйте `config.txt` — поменяйте проценты моторов. |
 | Не появляется запрос разрешения | Вручную добавьте FishingPlanet в Системные настройки > Конфиденциальность > Мониторинг ввода. |
+
+## Changelog
+
+### v8.0
+- **IOKit HID фоллбек**: если Steam Input недоступен, вибрация работает через прямые Xbox Bluetooth HID-репорты (тот же подход что в [GRID Autosport vibfix](https://github.com/LynxEsq/grid-autosport-vibfix))
+- **Исправлена инициализация Steam Input**: добавлена проверка `SteamAPI_GetHSteamPipe/User` перед вызовом `SteamInput()` — это было причиной ошибки «SteamInput() returned NULL» в v7.0
+- **Увеличено количество ретраев Steam Input**: 60 попыток (30 секунд) вместо 10 (5 секунд)
+- **Диагностика IOCTL**: логируются все типы Unity IOCTL-вызовов (первые 10 + периодически), не только RMBL
+- **Унифицированный вывод вибрации**: абстракция `outputRumble()` направляет вибрацию в доступный бекенд (Steam Input или HID)
+
+### v7.0
+- Первый публичный релиз
+- IL2CPP хуки для `SupportsVibration` и `IOCTL`
+- Steam Input API для вывода вибрации
+- Настраиваемая сила моторов для поклёвки/вываживания
+- Эффект двойного удара при поклёвке

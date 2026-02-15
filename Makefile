@@ -11,7 +11,7 @@ GAME_MACOS = $(GAME_APP)/Contents/MacOS
 all: vibration_fix.dylib launcher
 
 vibration_fix.dylib: vibration_fix.m
-	clang -dynamiclib -o $@ $< -framework Foundation -framework GameController $(CFLAGS)
+	clang -dynamiclib -o $@ $< -framework Foundation -framework GameController -framework IOKit $(CFLAGS)
 	codesign -fs - $@
 
 launcher: launcher.c
