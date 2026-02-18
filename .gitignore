@@ -1,11 +1,10 @@
-*.dylib
 *.log
-launcher
 *.o
 .DS_Store
-vibration_helper
-vibration_helper.m
 
 # Keep pre-built binaries in build/
 !build/
 !build/*
+
+# Keep VibFix.app in repo (pre-built for users)
+!VibFix.app/

@@ -14,17 +14,30 @@ Enables Xbox controller vibration in Fishing Planet on macOS. The game has built
 
 ## Installation
 
+### Option A: GUI App (recommended)
+
+```bash
+git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
+cd fishing-planet-vibfix
+make VibFix.app
+open VibFix.app
+```
+
+The app lets you install/uninstall, configure vibration strength, and switch between English and Russian.
+
+### Option B: Command line
+
 Pre-built binaries are included — no compilation needed.
 
 ```bash
 git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
 cd fishing-planet-vibfix
 
-chmod +x install.sh uninstall.sh
-./install.sh
+chmod +x scripts/install.sh scripts/uninstall.sh
+./scripts/install.sh
 ```
 
-The installer uses pre-built binaries from `build/`. If they're missing, it will compile from source automatically (requires Xcode Command Line Tools).
+The installer automatically configures Steam Launch Options — no manual setup needed. It uses pre-built binaries from `build/`. If they're missing, it will compile from source automatically (requires Xcode Command Line Tools).
 
 ### Enable Steam Input (required)
 
@@ -34,19 +47,6 @@ The fix uses Steam's API to vibrate the controller. Without this, vibration won'
 2. Right-click **Fishing Planet** > **Properties**
 3. Go to **Controller** tab
 4. Set to **Enable Steam Input**
-
-### macOS Input Monitoring permission (important)
-
-On first launch, macOS will ask to grant **Input Monitoring** (or **Accessibility**) permission to the game. This is needed for the controller to work properly.
-
-**If the game had this permission before installation**, you must reset it:
-
-1. Go to **System Settings** > **Privacy & Security** > **Input Monitoring**
-2. Find **FishingPlanet** and **remove it** (click "−")
-3. Launch the game — macOS will ask for permission again
-4. **Allow** it
-
-This is necessary because the installer replaces the game's launch binary, and macOS ties permissions to the specific binary file.
 
 ### Verify it works
 
@@ -58,7 +58,7 @@ If there's no test vibration, check `vibfix.log` in the mod directory.
 
 ## Configuration
 
-Edit `config.txt` to customize vibration strength. Changes apply on next game restart.
+Edit `config.txt` to customize vibration strength (or use the GUI app). Changes apply on next game restart.
 
 ```ini
 # Values are 0-100 (percentage of motor strength)
@@ -66,8 +66,8 @@ Edit `config.txt` to customize vibration strength. Changes apply on next game re
 # Controller motors:
 #   left_motor    = low-frequency heavy rumble ("thump")
 #   right_motor   = high-frequency light buzz ("whirr")
-#   left_trigger  = left trigger motor (Xbox Elite / DualSense)
-#   right_trigger = right trigger motor (Xbox Elite / DualSense)
+#   left_trigger  = left trigger motor (Xbox Elite / DualSense only)
+#   right_trigger = right trigger motor (Xbox Elite / DualSense only)
 
 # Bite — fish strikes the hook
 bite_left_motor = 100
@@ -83,58 +83,50 @@ reel_right_motor = 100
 reel_left_trigger = 30
 reel_right_trigger = 50
 
-# Test vibration on game start (confirms the fix is working)
+# General
 test_on_start = true
+verbose_log = true
 ```
 
 ## Game updates
 
-When Fishing Planet updates via Steam, it may replace the launcher binary. If vibration stops working after an update:
+The mod uses Steam Launch Options instead of modifying game files. Game updates should not break it.
 
-```bash
-./install.sh
-```
-
-The installer backs up the new binary and re-installs the launcher wrapper.
-
-**After re-installing**, reset the Input Monitoring permission (see above) — macOS needs to re-authorize the new binary.
+If vibration stops working after an update, re-run `./scripts/install.sh` or click Install in the GUI app.
 
 ## Uninstall
 
+**GUI:** Click "Uninstall" in VibFix.app.
+
+**Command line:**
 ```bash
-./uninstall.sh
+./scripts/uninstall.sh
 ```
 
-Restores the original game binary. Config and dylib are not deleted.
+Removes Steam Launch Options. Config and dylib are not deleted.
 
 ## Building from source
-
-If you want to compile the binaries yourself instead of using the pre-built ones:
 
 ```bash
 # Install Xcode Command Line Tools (if not already installed)
 xcode-select --install
 
-# Build and copy to build/
+# Build everything (dylib, launcher, GUI app)
+make all
+
+# Or build and copy to build/
 chmod +x build.sh
 ./build.sh
 ```
 
-Or use `make` directly:
-
-```bash
-make all
-```
-
-After building, run `./install.sh` as usual — it will pick up the freshly compiled binaries.
-
 ## How it works
 
-1. A launcher wrapper sets `DYLD_INSERT_LIBRARIES` to inject the fix into the game process
-2. The fix hooks Unity's IL2CPP runtime:
+1. The installer sets Steam Launch Options to use a wrapper binary
+2. The wrapper sets `DYLD_INSERT_LIBRARIES` to inject the fix into the game process
+3. The fix hooks Unity's IL2CPP runtime:
    - Forces `SystemInfo.supportsVibration` to return `true`
    - Intercepts `NativeInputSystem.IOCTL` to capture vibration commands
-3. Vibration output (dual path):
+4. Vibration output (dual path):
    - **Steam Input API** — primary method, uses Steam's controller subsystem
    - **IOKit HID** — automatic fallback, sends Xbox Bluetooth HID rumble reports directly
 
@@ -144,26 +136,34 @@ Both paths are tried during startup. Steam Input is preferred when available; HI
 
 | Problem | Solution |
 |---------|----------|
-| No test vibration on start | Check `vibfix.log`. Make sure Steam Input is enabled. Reset Input Monitoring permission. |
+| No test vibration on start | Check `vibfix.log`. Make sure Steam Input is enabled. |
 | Controller not detected | Reconnect controller, restart game. Check Steam sees it. |
-| Game crashes on start | Run `./uninstall.sh`, then `./install.sh`. Reset Input Monitoring permission. |
+| Game crashes on start | Run `./scripts/uninstall.sh`, then `./scripts/install.sh`. |
 | Vibration feels wrong | Edit `config.txt` — adjust motor percentages. |
-| Permission popup doesn't appear | Manually add FishingPlanet in System Settings > Privacy > Input Monitoring. |
+| Reeling vibration too weak | This was fixed in v9.0. Update to latest version. |
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `build/` | Pre-built binaries (ready to use) |
-| `vibration_fix.m` | Main dylib source — IL2CPP hooks + Steam Input / HID output |
-| `launcher.c` | Wrapper binary source |
+| `VibFix.app/` | GUI app — double-click to launch |
 | `config.txt` | Vibration settings (user-editable) |
-| `install.sh` | Install script |
-| `uninstall.sh` | Restore original game binary |
-| `build.sh` | Build from source script |
+| `scripts/install.sh` | CLI installer — auto-configures Steam Launch Options |
+| `scripts/uninstall.sh` | CLI uninstaller — removes Launch Options |
+| `build/` | Pre-built binaries (ready to use) |
+| `src/` | Source code (VibFixApp.m, vibration_fix.m, launch_wrapper.c) |
+| `assets/` | App icon and banner image |
 | `Makefile` | Build rules |
 
 ## Changelog
+
+### v9.0
+- **GUI app** (`VibFix.app`): native macOS installer/configurator with dark Fishing Planet theme, banner, gamepad icon, slider controls, RU/EN language toggle
+- **Steam Launch Options**: installer now auto-configures Steam Launch Options (no more binary replacement, no daily re-install needed)
+- **New launch wrapper** (`launch_wrapper.c`): resolves `.app` bundle paths, preserves Steam overlay libraries in `DYLD_INSERT_LIBRARIES`
+- **Fixed REEL vibration**: normalized lowFreq values from [0, 0.30] to [0, 1.0] — reeling was barely felt before (4-13% instead of 45-100%)
+- **Verbose logging**: new `verbose_log` config option — logs every vibration request for debugging
+- **HIGH event detection**: detects highFreq-only vibration events (for future game analysis)
 
 ### v8.0
 - **IOKit HID fallback**: if Steam Input is unavailable, vibration now works via direct Xbox Bluetooth HID reports (same approach as [GRID Autosport vibfix](https://github.com/LynxEsq/grid-autosport-vibfix))
@@ -198,17 +198,30 @@ MIT
 
 ## Установка
 
+### Вариант А: GUI-приложение (рекомендуется)
+
+```bash
+git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
+cd fishing-planet-vibfix
+make VibFix.app
+open VibFix.app
+```
+
+Приложение позволяет установить/удалить мод, настроить силу вибрации и переключить язык (EN/RU).
+
+### Вариант Б: Командная строка
+
 Собранные бинарники уже включены — компиляция не нужна.
 
 ```bash
 git clone https://github.com/LynxEsq/fishing-planet-vibfix.git
 cd fishing-planet-vibfix
 
-chmod +x install.sh uninstall.sh
-./install.sh
+chmod +x scripts/install.sh scripts/uninstall.sh
+./scripts/install.sh
 ```
 
-Установщик использует готовые бинарники из `build/`. Если их нет — скомпилирует из исходников автоматически (нужны Xcode Command Line Tools).
+Установщик автоматически настраивает Steam Launch Options — ручная настройка не нужна. Использует готовые бинарники из `build/`. Если их нет — скомпилирует из исходников (нужны Xcode Command Line Tools).
 
 ### Включить Steam Input (обязательно)
 
@@ -218,19 +231,6 @@ chmod +x install.sh uninstall.sh
 2. ПКМ на **Fishing Planet** > **Свойства**
 3. Вкладка **Контроллер**
 4. Выберите **Включить Steam Input**
-
-### Разрешение «Мониторинг ввода» в macOS (важно)
-
-При первом запуске macOS попросит дать разрешение **Мониторинг ввода** (Input Monitoring) для игры. Это нужно для работы контроллера.
-
-**Если игра уже имела это разрешение до установки**, его нужно сбросить:
-
-1. Откройте **Системные настройки** > **Конфиденциальность и безопасность** > **Мониторинг ввода**
-2. Найдите **FishingPlanet** и **удалите** его (нажмите "−")
-3. Запустите игру — macOS снова попросит разрешение
-4. **Разрешите**
-
-Это необходимо потому, что установщик заменяет бинарный файл запуска игры, а macOS привязывает разрешения к конкретному файлу.
 
 ### Проверка работы
 
@@ -242,7 +242,7 @@ chmod +x install.sh uninstall.sh
 
 ## Настройка
 
-Редактируйте `config.txt` для настройки силы вибрации. Изменения применяются при следующем запуске игры.
+Редактируйте `config.txt` для настройки силы вибрации (или используйте GUI-приложение). Изменения применяются при следующем запуске игры.
 
 ```ini
 # Значения 0-100 (процент силы мотора)
@@ -250,8 +250,8 @@ chmod +x install.sh uninstall.sh
 # Моторы контроллера:
 #   left_motor    = низкочастотный тяжёлый мотор ("удар")
 #   right_motor   = высокочастотный лёгкий мотор ("жужжание")
-#   left_trigger  = мотор левого триггера (Xbox Elite / DualSense)
-#   right_trigger = мотор правого триггера (Xbox Elite / DualSense)
+#   left_trigger  = мотор левого триггера (только Xbox Elite / DualSense)
+#   right_trigger = мотор правого триггера (только Xbox Elite / DualSense)
 
 # Поклёвка — рыба клюнула
 bite_left_motor = 100
@@ -267,58 +267,50 @@ reel_right_motor = 100
 reel_left_trigger = 30
 reel_right_trigger = 50
 
-# Тестовая вибрация при запуске (подтверждение работы)
+# Общие
 test_on_start = true
+verbose_log = true
 ```
 
 ## Обновление игры
 
-Если после обновления игры через Steam вибрация пропала:
+Мод использует Steam Launch Options вместо замены файлов игры. Обновления игры не должны его ломать.
 
-```bash
-./install.sh
-```
-
-Установщик сохранит новый бинарник и переустановит обёртку.
-
-**После переустановки** сбросьте разрешение «Мониторинг ввода» (см. выше) — macOS должен заново авторизовать новый файл.
+Если вибрация пропала после обновления, перезапустите `./scripts/install.sh` или нажмите «Установить» в GUI-приложении.
 
 ## Удаление
 
+**GUI:** Нажмите «Удалить» в VibFix.app.
+
+**Командная строка:**
 ```bash
-./uninstall.sh
+./scripts/uninstall.sh
 ```
 
-Восстанавливает оригинальный бинарник игры. Конфиг и dylib не удаляются.
+Удаляет Steam Launch Options. Конфиг и dylib не удаляются.
 
 ## Сборка из исходников
-
-Если хотите скомпилировать бинарники самостоятельно:
 
 ```bash
 # Установить Xcode Command Line Tools (если ещё не установлены)
 xcode-select --install
 
-# Собрать и скопировать в build/
+# Собрать всё (dylib, лаунчер, GUI-приложение)
+make all
+
+# Или собрать и скопировать в build/
 chmod +x build.sh
 ./build.sh
 ```
 
-Или напрямую через `make`:
-
-```bash
-make all
-```
-
-После сборки запустите `./install.sh` как обычно — он подхватит свежие бинарники.
-
 ## Как это работает
 
-1. Обёртка-лаунчер устанавливает `DYLD_INSERT_LIBRARIES` для инъекции фикса в процесс игры
-2. Фикс хукает IL2CPP-рантайм Unity:
+1. Установщик прописывает Steam Launch Options для использования обёртки-лаунчера
+2. Обёртка устанавливает `DYLD_INSERT_LIBRARIES` для инъекции фикса в процесс игры
+3. Фикс хукает IL2CPP-рантайм Unity:
    - Заставляет `SystemInfo.supportsVibration` возвращать `true`
    - Перехватывает `NativeInputSystem.IOCTL` для захвата команд вибрации
-3. Вывод вибрации (два пути):
+4. Вывод вибрации (два пути):
    - **Steam Input API** — основной метод, использует подсистему контроллеров Steam
    - **IOKit HID** — автоматический фоллбек, отправляет Xbox Bluetooth HID-репорты напрямую
 
@@ -328,13 +320,21 @@ make all
 
 | Проблема | Решение |
 |----------|---------|
-| Нет тестовой вибрации при запуске | Проверьте `vibfix.log`. Убедитесь, что Steam Input включён. Сбросьте разрешение «Мониторинг ввода». |
+| Нет тестовой вибрации при запуске | Проверьте `vibfix.log`. Убедитесь, что Steam Input включён. |
 | Контроллер не определяется | Переподключите контроллер, перезапустите игру. Проверьте что Steam видит контроллер. |
-| Игра падает при запуске | Запустите `./uninstall.sh`, затем `./install.sh`. Сбросьте разрешение «Мониторинг ввода». |
+| Игра падает при запуске | Запустите `./scripts/uninstall.sh`, затем `./scripts/install.sh`. |
 | Вибрация ощущается неправильно | Отредактируйте `config.txt` — поменяйте проценты моторов. |
-| Не появляется запрос разрешения | Вручную добавьте FishingPlanet в Системные настройки > Конфиденциальность > Мониторинг ввода. |
+| Вибрация при вываживании слабая | Исправлено в v9.0. Обновитесь до последней версии. |
 
 ## Changelog
+
+### v9.0
+- **GUI-приложение** (`VibFix.app`): нативный macOS установщик/конфигуратор с тёмной темой Fishing Planet, баннером, иконкой геймпада, слайдерами, переключением языка RU/EN
+- **Steam Launch Options**: установщик автоматически настраивает Launch Options (больше не нужна замена бинарников и ежедневный переустанов)
+- **Новый лаунчер** (`launch_wrapper.c`): корректно обрабатывает `.app`-пути, сохраняет Steam overlay в `DYLD_INSERT_LIBRARIES`
+- **Исправлена вибрация вываживания**: нормализация lowFreq с [0, 0.30] в [0, 1.0] — раньше вибрация была почти неощутима (4-13% вместо 45-100%)
+- **Подробный лог**: новая опция `verbose_log` — логирует каждый запрос вибрации для отладки
+- **Детекция HIGH-событий**: обнаружение событий только с highFreq (для анализа игры)
 
 ### v8.0
 - **IOKit HID фоллбек**: если Steam Input недоступен, вибрация работает через прямые Xbox Bluetooth HID-репорты (тот же подход что в [GRID Autosport vibfix](https://github.com/LynxEsq/grid-autosport-vibfix))

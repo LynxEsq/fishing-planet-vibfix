@@ -38,6 +38,13 @@ static void find_install_dir(void) {
             strncpy(g_install_dir, name, sizeof(g_install_dir) - 1);
             char *last_slash = strrchr(g_install_dir, '/');
             if (last_slash) *last_slash = '\0';
+            // If config.txt not here, try parent dir (dylib may be in build/)
+            char test[1024];
+            snprintf(test, sizeof(test), "%s/config.txt", g_install_dir);
+            if (access(test, R_OK) != 0) {
+                last_slash = strrchr(g_install_dir, '/');
+                if (last_slash) *last_slash = '\0';
+            }
             break;
         }
     }
@@ -59,6 +66,7 @@ typedef struct {
     float reel_trigger_right;
 
     int   test_on_start;
+    int   verbose_log;
 } VibConfig;
 
 static VibConfig g_cfg = {
@@ -75,6 +83,7 @@ static VibConfig g_cfg = {
     .reel_trigger_right = 0.5f,
 
     .test_on_start = 1,
+    .verbose_log = 1,
 };
 
 static float clampf(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
@@ -149,6 +158,7 @@ static void load_config(void) {
         else if (strcmp(key, "reel_left_trigger") == 0)     g_cfg.reel_trigger_left = fv;
         else if (strcmp(key, "reel_right_trigger") == 0)    g_cfg.reel_trigger_right = fv;
         else if (strcmp(key, "test_on_start") == 0)         g_cfg.test_on_start = is_true;
+        else if (strcmp(key, "verbose_log") == 0)           g_cfg.verbose_log = is_true;
     }
     fclose(f);
 
@@ -159,7 +169,7 @@ static void load_config(void) {
     viblog("Config: reel L=%.0f%% R=%.0f%% LT=%.0f%% RT=%.0f%%",
            g_cfg.reel_left*100, g_cfg.reel_right*100,
            g_cfg.reel_trigger_left*100, g_cfg.reel_trigger_right*100);
-    viblog("Config: test_on_start=%d", g_cfg.test_on_start);
+    viblog("Config: test_on_start=%d verbose_log=%d", g_cfg.test_on_start, g_cfg.verbose_log);
 }
 
 // ============ IL2CPP API typedefs ============
@@ -519,9 +529,18 @@ static void sendRumble(float lowFreq, float highFreq) {
                 });
             });
         }
+    } else if (lowFreq < 0.001f && highFreq >= 0.001f) {
+        // HIGH-FREQ ONLY — unknown event, log for analysis
+        float str = highFreq;
+        mL  = (uint8_t)(str * g_cfg.reel_left * 100.0f);
+        mR  = (uint8_t)(str * g_cfg.reel_right * 100.0f);
+        mLT = (uint8_t)(str * g_cfg.reel_trigger_left * 100.0f);
+        mRT = (uint8_t)(str * g_cfg.reel_trigger_right * 100.0f);
+        event = "HIGH";
     } else {
-        // REEL
-        float str = lowFreq;
+        // REEL — normalize lowFreq from [0, 0.30] to [0, 1.0]
+        float str = lowFreq / 0.30f;
+        if (str > 1.0f) str = 1.0f;
         mL  = (uint8_t)(str * g_cfg.reel_left * 100.0f);
         mR  = (uint8_t)(str * g_cfg.reel_right * 100.0f);
         mLT = (uint8_t)(str * g_cfg.reel_trigger_left * 100.0f);
@@ -533,8 +552,9 @@ static void sendRumble(float lowFreq, float highFreq) {
 
     const char *via = have_steam ? "Steam" : "HID";
     static int n = 0;
-    if (++n <= 30 || n % 100 == 0)
-        viblog("rumble #%d [%s via %s]: L=%u R=%u LT=%u RT=%u (src=%.3f/%.3f)",
+    n++;
+    if (g_cfg.verbose_log || n <= 30 || n % 100 == 0)
+        viblog("rumble #%d [%s via %s]: L=%u R=%u LT=%u RT=%u (src=%.4f/%.4f)",
                n, event, via, mL, mR, mLT, mRT, lowFreq, highFreq);
 }
 
@@ -551,15 +571,40 @@ static int hook_supports_vibration(void) {
 }
 
 static int64_t hook_ioctl(int32_t deviceId, int32_t type, void *buffer, int32_t size) {
-    // Log ALL IOCTL types for debugging (first 10 of each type)
     static int ioctl_count = 0;
-    if (++ioctl_count <= 10 || ioctl_count % 500 == 0) {
-        char fourcc[5] = {0};
-        fourcc[0] = (type >> 24) & 0xFF;
-        fourcc[1] = (type >> 16) & 0xFF;
-        fourcc[2] = (type >> 8) & 0xFF;
-        fourcc[3] = type & 0xFF;
-        viblog("IOCTL #%d: type=0x%08X '%s' dev=%d size=%d", ioctl_count, type, fourcc, deviceId, size);
+    ioctl_count++;
+
+    char fourcc[5] = {0};
+    fourcc[0] = (type >> 24) & 0xFF;
+    fourcc[1] = (type >> 16) & 0xFF;
+    fourcc[2] = (type >> 8) & 0xFF;
+    fourcc[3] = type & 0xFF;
+
+    // Track unique IOCTL types — always log first occurrence with hex dump
+    static uint32_t seen_types[64];
+    static int seen_count = 0;
+    int is_new_type = 1;
+    for (int i = 0; i < seen_count; i++) {
+        if (seen_types[i] == (uint32_t)type) { is_new_type = 0; break; }
+    }
+    if (is_new_type && seen_count < 64) {
+        seen_types[seen_count++] = (uint32_t)type;
+        viblog("IOCTL NEW TYPE: 0x%08X '%s' dev=%d size=%d (total types: %d)",
+               type, fourcc, deviceId, size, seen_count);
+        if (buffer && size > 0) {
+            int dump_len = size < 64 ? size : 64;
+            char hex[200] = {0};
+            for (int i = 0; i < dump_len; i++)
+                snprintf(hex + i*3, 4, "%02X ", ((uint8_t*)buffer)[i]);
+            viblog("  hex[%d]: %s", size, hex);
+        }
+    }
+
+    // Log non-RMBL IOCTL in verbose mode
+    if (g_cfg.verbose_log && type != RMBL_FOURCC) {
+        if (ioctl_count <= 50 || ioctl_count % 200 == 0)
+            viblog("IOCTL #%d: 0x%08X '%s' dev=%d size=%d",
+                   ioctl_count, type, fourcc, deviceId, size);
     }
 
     if (type == RMBL_FOURCC && buffer) {
@@ -577,9 +622,20 @@ static int64_t hook_ioctl(int32_t deviceId, int32_t type, void *buffer, int32_t 
                 high = *(float *)((uint8_t *)buffer + 4);
             }
         }
-        static int n = 0;
-        if (++n <= 20 || n % 100 == 0)
-            viblog("RMBL #%d: low=%.3f high=%.3f dev=%d", n, low, high, deviceId);
+
+        static int rmbl_n = 0;
+        rmbl_n++;
+        if (g_cfg.verbose_log) {
+            char hex[200] = {0};
+            int dump_len = size < 64 ? size : 64;
+            for (int i = 0; i < dump_len; i++)
+                snprintf(hex + i*3, 4, "%02X ", ((uint8_t*)buffer)[i]);
+            viblog("RMBL #%d: low=%.4f high=%.4f dev=%d size=%d buf=[%s]",
+                   rmbl_n, low, high, deviceId, size, hex);
+        } else if (rmbl_n <= 20 || rmbl_n % 100 == 0) {
+            viblog("RMBL #%d: low=%.3f high=%.3f dev=%d", rmbl_n, low, high, deviceId);
+        }
+
         sendRumble(low, high);
         return (int64_t)(size > 0 ? size : 16);
     }
