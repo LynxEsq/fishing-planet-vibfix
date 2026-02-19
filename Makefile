@@ -19,7 +19,7 @@ build/launch: src/launch_wrapper.c
 
 VibFix.app: src/VibFixApp.m assets/AppIcon.icns
 	mkdir -p VibFix.app/Contents/MacOS VibFix.app/Contents/Resources
-	clang -o VibFix.app/Contents/MacOS/VibFix $< -framework Cocoa -framework QuartzCore $(CFLAGS)
+	clang -o VibFix.app/Contents/MacOS/VibFix $< -framework Cocoa -framework QuartzCore -framework IOKit $(CFLAGS)
 	cp assets/AppIcon.icns VibFix.app/Contents/Resources/AppIcon.icns
 	/usr/libexec/PlistBuddy \
 		-c "Clear dict" \

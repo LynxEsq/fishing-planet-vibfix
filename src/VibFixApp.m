@@ -2,6 +2,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
+#import <IOKit/hid/IOHIDManager.h>
 
 #define VERSION "9.0"
 
@@ -12,6 +13,62 @@
 #define FP_DIM     [NSColor colorWithSRGBRed:0.40  green:0.45  blue:0.50  alpha:1.0]
 #define FP_SEP     [NSColor colorWithSRGBRed:0.15  green:0.19  blue:0.25  alpha:1.0]
 #define FP_WARN    [NSColor colorWithSRGBRed:0.85  green:0.55  blue:0.20  alpha:1.0]
+
+// ── IOKit HID — Xbox Controller ──
+static IOHIDDeviceRef g_xbox_hid = NULL;
+static int g_hid_ready = 0;
+
+static const int g_xbox_pids[] = {
+    0x0B13, 0x0B20, 0x0B21, 0x0B22, 0x02E0, 0x02FD, 0x0B05, 0x0B12, 0
+};
+static int is_xbox_pid(int pid) {
+    for (int i = 0; g_xbox_pids[i]; i++) if (g_xbox_pids[i] == pid) return 1;
+    return 0;
+}
+static void hid_matched(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef device) {
+    if (g_hid_ready) return;
+    CFNumberRef pidRef = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductIDKey));
+    int32_t pid = 0;
+    if (pidRef) CFNumberGetValue(pidRef, kCFNumberSInt32Type, &pid);
+    if (is_xbox_pid(pid)) {
+        g_xbox_hid = device; CFRetain(device); g_hid_ready = 1;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"HIDStatusChanged" object:nil];
+        });
+    }
+}
+static void hid_removed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef device) {
+    if (device == g_xbox_hid) {
+        g_hid_ready = 0; CFRelease(g_xbox_hid); g_xbox_hid = NULL;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"HIDStatusChanged" object:nil];
+        });
+    }
+}
+static void start_hid_search(void) {
+    dispatch_async(dispatch_get_global_queue(0,0), ^{
+        IOHIDManagerRef mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+        if (!mgr) return;
+        int vid = 0x045E;
+        CFNumberRef vidNum = CFNumberCreate(NULL, kCFNumberIntType, &vid);
+        CFStringRef keys[] = { CFSTR(kIOHIDVendorIDKey) };
+        CFTypeRef vals[] = { vidNum };
+        CFDictionaryRef match = CFDictionaryCreate(NULL, (const void **)keys, (const void **)vals,
+            1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        IOHIDManagerSetDeviceMatching(mgr, match);
+        CFRelease(match); CFRelease(vidNum);
+        IOHIDManagerRegisterDeviceMatchingCallback(mgr, hid_matched, NULL);
+        IOHIDManagerRegisterDeviceRemovalCallback(mgr, hid_removed, NULL);
+        IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+        IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
+        CFRunLoopRun();
+    });
+}
+static void send_hid_rumble(uint8_t lt, uint8_t rt, uint8_t left, uint8_t right) {
+    if (!g_hid_ready || !g_xbox_hid) return;
+    uint8_t report[9] = {0x03, 0x0F, lt, rt, left, right, 0xFF, 0x00, 0xEB};
+    IOHIDDeviceSetReport(g_xbox_hid, kIOHIDReportTypeOutput, 0x03, report, sizeof(report));
+}
 
 // ── Localization ──
 static int g_lang = 0; // 0=EN, 1=RU
@@ -41,6 +98,10 @@ static NSDictionary *L(void) {
             @"dbl_str":    @"2nd Hit",        @"dbl_str_tip": @"Strength of the second hit",
             @"test":       @"Test vibration on start", @"test_tip": @"Short buzz when game launches",
             @"verbose":    @"Verbose logging",  @"verbose_tip": @"Log every vibration request",
+            @"test_bite":  @"Test Bite", @"test_reel": @"Test Reel",
+            @"ctrl_on":    @"Controller connected",
+            @"ctrl_off":   @"No controller — connect Xbox via Bluetooth",
+            @"no_ctrl_t":  @"No Controller", @"no_ctrl_i": @"Connect Xbox controller via Bluetooth first.",
         };
         ru = @{
             @"status_on":  @"Установлено — Launch Options настроены в Steam",
@@ -64,6 +125,10 @@ static NSDictionary *L(void) {
             @"dbl_str":    @"Сила 2-го",       @"dbl_str_tip": @"Сила второго удара",
             @"test":       @"Тест вибрации при запуске", @"test_tip": @"Короткая вибрация при старте игры",
             @"verbose":    @"Подробный лог",    @"verbose_tip": @"Логировать каждый запрос вибрации",
+            @"test_bite":  @"Тест поклёвки", @"test_reel": @"Тест вываживания",
+            @"ctrl_on":    @"Контроллер подключён",
+            @"ctrl_off":   @"Нет контроллера — подключите Xbox по Bluetooth",
+            @"no_ctrl_t":  @"Нет контроллера", @"no_ctrl_i": @"Подключите Xbox-контроллер по Bluetooth.",
         };
     }
     return g_lang == 0 ? en : ru;
@@ -94,6 +159,8 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
 @property (strong) NSMapTable *sliderToKey;
 @property (strong) NSMutableDictionary<NSString*,NSButton*> *checks;
 @property (strong) NSString *projectDir;
+@property (strong) NSTextField *ctrlLabel;
+@property (strong) NSMapTable *testBtnToKey;
 @end
 
 @implementation AppDelegate
@@ -102,8 +169,13 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     self.sliders = [NSMutableDictionary new];
     self.sliderLabels = [NSMutableDictionary new];
     self.sliderToKey = [NSMapTable strongToStrongObjectsMapTable];
+    self.testBtnToKey = [NSMapTable strongToStrongObjectsMapTable];
     self.checks = [NSMutableDictionary new];
     self.projectDir = [[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(hidStatusChanged:)
+                                                 name:@"HIDStatusChanged" object:nil];
+    start_hid_search();
 
     [self setupAppIcon];
     [self buildWindow];
@@ -174,6 +246,7 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     [self.sliders removeAllObjects];
     [self.sliderLabels removeAllObjects];
     [self.sliderToKey removeAllObjects];
+    [self.testBtnToKey removeAllObjects];
     [self.checks removeAllObjects];
 
     FlippedView *doc = [[FlippedView alloc] initWithFrame:NSMakeRect(0,0,W,900)];
@@ -225,10 +298,20 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     br.spacing = 12;
     [st addArrangedSubview:br];
 
+    // Controller status
+    self.ctrlLabel = makeLabel(@"", 11, FP_DIM, NO);
+    [st addArrangedSubview:self.ctrlLabel];
+    [self refreshCtrlStatus];
+
     [st addArrangedSubview:[self sep]];
 
     // ── Bite ──
-    [st addArrangedSubview:makeLabel(S(@"bite_t"), 11, FP_ACCENT, YES)];
+    NSButton *testBiteBtn = [self btn:S(@"test_bite") action:@selector(testBite:)];
+    testBiteBtn.font = [NSFont systemFontOfSize:10];
+    NSStackView *biteHeader = [NSStackView stackViewWithViews:@[
+        makeLabel(S(@"bite_t"), 11, FP_ACCENT, YES), testBiteBtn]];
+    biteHeader.spacing = 8;
+    [st addArrangedSubview:biteHeader];
     [st addArrangedSubview:makeLabel(S(@"bite_d"), 10, FP_DIM, NO)];
     [st addArrangedSubview:[self sl:S(@"heavy") key:@"bite_left_motor" val:100 tip:S(@"heavy_tip")]];
     [st addArrangedSubview:[self sl:S(@"light") key:@"bite_right_motor" val:50 tip:S(@"light_tip")]];
@@ -240,7 +323,12 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     [st addArrangedSubview:[self sep]];
 
     // ── Reel ──
-    [st addArrangedSubview:makeLabel(S(@"reel_t"), 11, FP_ACCENT, YES)];
+    NSButton *testReelBtn = [self btn:S(@"test_reel") action:@selector(testReel:)];
+    testReelBtn.font = [NSFont systemFontOfSize:10];
+    NSStackView *reelHeader = [NSStackView stackViewWithViews:@[
+        makeLabel(S(@"reel_t"), 11, FP_ACCENT, YES), testReelBtn]];
+    reelHeader.spacing = 8;
+    [st addArrangedSubview:reelHeader];
     [st addArrangedSubview:makeLabel(S(@"reel_d"), 10, FP_DIM, NO)];
     [st addArrangedSubview:[self sl:S(@"heavy") key:@"reel_left_motor" val:45 tip:S(@"heavy_tip")]];
     [st addArrangedSubview:[self sl:S(@"light") key:@"reel_right_motor" val:100 tip:S(@"light_tip")]];
@@ -290,18 +378,25 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     s.continuous = YES;
     s.toolTip = tip;
     s.trackFillColor = FP_ACCENT;
-    [s.widthAnchor constraintEqualToConstant:195].active = YES;
+    [s.widthAnchor constraintEqualToConstant:175].active = YES;
 
     NSTextField *v = makeLabel([NSString stringWithFormat:@"%d%%", val], 12, FP_DIM, NO);
     v.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
     [v.widthAnchor constraintEqualToConstant:40].active = YES;
 
+    NSButton *tb = [NSButton buttonWithTitle:@"\u25B6" target:self action:@selector(testMotor:)];
+    tb.bordered = NO;
+    tb.contentTintColor = FP_ACCENT;
+    tb.font = [NSFont systemFontOfSize:10];
+    tb.toolTip = tip;
+    [self.testBtnToKey setObject:key forKey:tb];
+
     self.sliders[key] = s;
     self.sliderLabels[key] = v;
     [self.sliderToKey setObject:key forKey:s];
 
-    NSStackView *row = [NSStackView stackViewWithViews:@[lbl, s, v]];
-    row.spacing = 8;
+    NSStackView *row = [NSStackView stackViewWithViews:@[lbl, s, v, tb]];
+    row.spacing = 6;
     return row;
 }
 
@@ -471,6 +566,76 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
             [self refreshStatus];
         });
     });
+}
+
+// ── Controller status ──
+- (void)hidStatusChanged:(NSNotification *)n { [self refreshCtrlStatus]; }
+
+- (void)refreshCtrlStatus {
+    if (!self.ctrlLabel) return;
+    if (g_hid_ready) {
+        self.ctrlLabel.stringValue = [NSString stringWithFormat:@"\u25CF %@", S(@"ctrl_on")];
+        self.ctrlLabel.textColor = FP_ACCENT;
+    } else {
+        self.ctrlLabel.stringValue = [NSString stringWithFormat:@"\u25CB %@", S(@"ctrl_off")];
+        self.ctrlLabel.textColor = FP_WARN;
+    }
+}
+
+// ── Vibration tests ──
+- (uint8_t)motorVal:(NSString *)key { return (uint8_t)([self iv:key] * 255 / 100); }
+
+- (void)rumblePulse:(uint8_t)lt rt:(uint8_t)rt left:(uint8_t)left right:(uint8_t)right ms:(int)ms {
+    if (!g_hid_ready) { [self alert:S(@"no_ctrl_t") info:S(@"no_ctrl_i")]; return; }
+    dispatch_async(dispatch_get_global_queue(0,0), ^{
+        send_hid_rumble(lt, rt, left, right);
+        usleep(ms * 1000);
+        send_hid_rumble(0, 0, 0, 0);
+    });
+}
+
+- (void)testBite:(id)sender {
+    if (!g_hid_ready) { [self alert:S(@"no_ctrl_t") info:S(@"no_ctrl_i")]; return; }
+    uint8_t L = [self motorVal:@"bite_left_motor"];
+    uint8_t R = [self motorVal:@"bite_right_motor"];
+    uint8_t LT = [self motorVal:@"bite_left_trigger"];
+    uint8_t RT = [self motorVal:@"bite_right_trigger"];
+    BOOL dbl = self.checks[@"bite_double_tap"].state == NSControlStateValueOn;
+    uint8_t str2 = [self motorVal:@"bite_double_tap_strength"];
+    uint8_t L2 = (uint8_t)(L * str2 / 255);
+    uint8_t R2 = (uint8_t)(R * str2 / 255);
+
+    dispatch_async(dispatch_get_global_queue(0,0), ^{
+        send_hid_rumble(LT, RT, L, R);
+        usleep(400000);
+        send_hid_rumble(0, 0, 0, 0);
+        if (dbl) {
+            usleep(100000);
+            send_hid_rumble(LT, RT, L2, R2);
+            usleep(300000);
+            send_hid_rumble(0, 0, 0, 0);
+        }
+    });
+}
+
+- (void)testReel:(id)sender {
+    [self rumblePulse:[self motorVal:@"reel_left_trigger"]
+                   rt:[self motorVal:@"reel_right_trigger"]
+                 left:[self motorVal:@"reel_left_motor"]
+                right:[self motorVal:@"reel_right_motor"] ms:1000];
+}
+
+- (void)testMotor:(NSButton *)sender {
+    NSString *key = [self.testBtnToKey objectForKey:sender];
+    if (!key) return;
+    uint8_t val = [self motorVal:key];
+    uint8_t lt=0, rt=0, left=0, right=0;
+    if ([key hasSuffix:@"left_motor"])        left = val;
+    else if ([key hasSuffix:@"right_motor"])  right = val;
+    else if ([key hasSuffix:@"left_trigger"]) lt = val;
+    else if ([key hasSuffix:@"right_trigger"])rt = val;
+    else if ([key hasSuffix:@"double_tap_strength"]) { left = val; right = val; }
+    [self rumblePulse:lt rt:rt left:left right:right ms:400];
 }
 
 - (void)alert:(NSString *)t info:(NSString *)i {

@@ -23,7 +23,11 @@ make VibFix.app
 open VibFix.app
 ```
 
-The app lets you install/uninstall, configure vibration strength, and switch between English and Russian.
+The app lets you install/uninstall, configure vibration strength, test each motor, and switch between English and Russian.
+
+### macOS Input Monitoring permission (optional)
+
+When you press a test vibration button in the GUI app, macOS may ask for **Input Monitoring** permission. This is needed only for the test buttons — the app uses IOKit HID to send rumble commands directly to the Xbox controller. You can safely deny this if you don't need to test vibration from the app. The actual in-game vibration works independently and does not require this permission for VibFix.app.
 
 ### Option B: Command line
 
@@ -207,7 +211,11 @@ make VibFix.app
 open VibFix.app
 ```
 
-Приложение позволяет установить/удалить мод, настроить силу вибрации и переключить язык (EN/RU).
+Приложение позволяет установить/удалить мод, настроить силу вибрации, протестировать каждый мотор и переключить язык (EN/RU).
+
+### Разрешение «Мониторинг ввода» в macOS (опционально)
+
+При нажатии кнопки тестирования вибрации в приложении macOS может запросить разрешение **Мониторинг ввода** (Input Monitoring). Это нужно только для кнопок теста — приложение отправляет команды вибрации напрямую на Xbox-контроллер через IOKit HID. Можно спокойно отказать, если тестировать вибрацию из приложения не нужно. Вибрация в самой игре работает независимо и не требует этого разрешения для VibFix.app.
 
 ### Вариант Б: Командная строка
 
