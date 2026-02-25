@@ -29,7 +29,7 @@ fi
 REMOVED=0
 for user_dir in "$USERDATA_DIR"/*/; do
     vdf="$user_dir/config/localconfig.vdf"
-    if [ -f "$vdf" ] && grep -q '"LaunchOptions".*vibfix' "$vdf" 2>/dev/null; then
+    if [ -f "$vdf" ] && grep -q 'vibfix' "$vdf" 2>/dev/null; then
         python3 << PYEOF
 import os
 
@@ -37,7 +37,16 @@ vdf_path = "$vdf"
 with open(vdf_path, 'r', encoding='utf-8', errors='replace') as f:
     lines = f.readlines()
 
-new_lines = [l for l in lines if not ('"LaunchOptions"' in l and 'vibfix' in l)]
+# Remove LaunchOptions lines that reference vibfix,
+# AND orphaned lines from broken VDF escaping (path-as-key with %command%)
+new_lines = []
+for l in lines:
+    s = l.strip()
+    if '"LaunchOptions"' in s and 'vibfix' in s:
+        continue
+    if '%command%' in s and 'vibfix' in s:
+        continue
+    new_lines.append(l)
 
 if len(new_lines) != len(lines):
     with open(vdf_path, 'w', encoding='utf-8') as f:

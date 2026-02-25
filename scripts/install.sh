@@ -85,9 +85,9 @@ app_id = "$APP_ID"
 launch_path = "$LAUNCH_BIN"
 vdf_files = """${CONFIGS[*]}""".strip().split("\n")
 
-# VDF-escaped: \"path\" %command%
-escaped = launch_path.replace('\\\\', '\\\\\\\\')
-vdf_value = '\\"' + escaped + '\\" %command%'
+# VDF value: path %command% (no inner quotes — VDF doesn't support \" escaping,
+# Steam corrupts the value on re-save if inner quotes are present)
+vdf_value = launch_path + ' %command%'
 
 for vdf_path in vdf_files:
     vdf_path = vdf_path.strip()
@@ -149,6 +149,18 @@ for vdf_path in vdf_files:
             break
 
     new_line = f'{indent}"LaunchOptions"\t\t"{vdf_value}"\n'
+
+    # Remove orphaned lines from previous broken VDF escaping
+    # (lines containing %command% that aren't LaunchOptions)
+    orphan_lines = []
+    for j in range(target_open + 1, target_close):
+        s = lines[j].strip()
+        if '%command%' in s and '"LaunchOptions"' not in s:
+            orphan_lines.append(j)
+    for j in reversed(orphan_lines):
+        removed = lines.pop(j)
+        target_close -= 1
+        print(f"  Removed orphaned line: {removed.strip()}")
 
     # Find existing LaunchOptions in this section
     launch_line = -1

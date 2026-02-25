@@ -161,6 +161,11 @@ Both paths are tried during startup. Steam Input is preferred when available; HI
 
 ## Changelog
 
+### v9.1
+- **Fixed Steam Launch Options persistence**: Steam corrupted LaunchOptions on re-save due to VDF `\"` escaping — path is now written without inner quotes
+- **Fixed install after game update**: installer now cleans up orphaned VDF entries from previous broken installs
+- **Fixed uninstall detection**: uninstaller now correctly finds and removes vibfix entries even when VDF was corrupted
+
 ### v9.0
 - **GUI app** (`VibFix.app`): native macOS installer/configurator with dark Fishing Planet theme, banner, gamepad icon, slider controls, RU/EN language toggle
 - **Steam Launch Options**: installer now auto-configures Steam Launch Options (no more binary replacement, no daily re-install needed)
@@ -335,6 +340,11 @@ chmod +x build.sh
 | Вибрация при вываживании слабая | Исправлено в v9.0. Обновитесь до последней версии. |
 
 ## Changelog
+
+### v9.1
+- **Исправлена потеря Steam Launch Options**: Steam портил LaunchOptions при повторном сохранении из-за экранирования `\"` в VDF — путь теперь пишется без внутренних кавычек
+- **Исправлена установка после обновления игры**: установщик очищает осиротевшие VDF-записи от предыдущих сломанных установок
+- **Исправлено обнаружение при удалении**: деинсталлятор корректно находит и удаляет записи vibfix даже при повреждённом VDF
 
 ### v9.0
 - **GUI-приложение** (`VibFix.app`): нативный macOS установщик/конфигуратор с тёмной темой Fishing Planet, баннером, иконкой геймпада, слайдерами, переключением языка RU/EN
