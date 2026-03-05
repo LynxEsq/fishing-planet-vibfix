@@ -140,6 +140,46 @@ static void *find_gameassembly_handle(void) {
     return NULL;
 }
 
+// Check if memory at addr is readable (safe probe via Mach VM)
+static int is_memory_readable(const void *addr, size_t size) {
+    vm_size_t out_size = 0;
+    uint8_t buf[64];
+    if (size > sizeof(buf)) size = sizeof(buf);
+    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, size,
+                                          (vm_address_t)buf, &out_size);
+    return kr == KERN_SUCCESS && out_size == size;
+}
+
+// Safe wrapper: probe image struct internals before calling api_image_get_class_count.
+// Il2CppImage contains pointers that get populated late; dereferencing them before
+// metadata is loaded crashes (KERN_INVALID_ADDRESS 0x135). We probe 512 bytes of the
+// image struct and check that the first few pointer-sized fields are non-NULL.
+static int safe_image_get_class_count(Il2CppImage *img, size_t *out_count) {
+    // Probe the image struct — it must be at least ~256 bytes and readable
+    if (!is_memory_readable(img, 256)) return 0;
+
+    // Read first 8 pointer-sized fields — internal pointers must be populated
+    uintptr_t fields[8];
+    vm_size_t out_size = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)img, sizeof(fields),
+                                          (vm_address_t)fields, &out_size);
+    if (kr != KERN_SUCCESS) return 0;
+
+    // Check that internal pointers look valid (not NULL, not tiny offsets)
+    // The first few fields of Il2CppImage are typically: nameNoExt, name, assembly, ...
+    // All should be valid pointers (> 0x10000) when metadata is loaded.
+    int valid_ptrs = 0;
+    for (int i = 0; i < 8; i++) {
+        if (fields[i] > 0x10000) valid_ptrs++;
+    }
+    if (valid_ptrs < 3) return 0;
+
+    // Now safe to call
+    size_t count = api_image_get_class_count(img);
+    if (out_count) *out_count = count;
+    return 1;
+}
+
 int resolve_il2cpp_api(void) {
     api_domain_get = (il2cpp_domain_get_t)dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
     if (!api_domain_get) {
@@ -196,17 +236,20 @@ int resolve_il2cpp_api(void) {
     if (!assemblies || asm_count == 0) return 0;
 
     // Verify that at least one assembly has a valid image with populated class tables.
-    // Images can exist before their metadata is loaded — class_from_name on an
-    // empty image dereferences uninitialized pointers (KERN_INVALID_ADDRESS 0x135).
+    // Images can exist before their metadata is loaded — calling api_image_get_class_count
+    // on an image with uninitialized internal pointers crashes (KERN_INVALID_ADDRESS 0x135).
+    // We probe image struct memory before calling the API to avoid the crash.
     int has_classes = 0;
     for (size_t i = 0; i < asm_count; i++) {
         Il2CppImage *img = api_assembly_get_image(assemblies[i]);
         if (!img) continue;
         if (api_image_get_class_count) {
-            size_t class_count = api_image_get_class_count(img);
-            if (class_count > 0) { has_classes = 1; break; }
+            size_t class_count = 0;
+            if (safe_image_get_class_count(img, &class_count) && class_count > 0) {
+                has_classes = 1;
+                break;
+            }
         } else {
-            // No class count API — at least verify image pointer is valid
             has_classes = 1;
             break;
         }
