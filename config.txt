@@ -1,38 +1,44 @@
 # Fishing Planet Vibration Fix — Configuration
-# =============================================
-#
 # Values are 0-100 (percentage of motor strength).
-# Edit and save — changes apply on next game restart.
-#
-# Controller motors:
-#   left_motor    = low-frequency, heavy rumble (the "thump")
-#   right_motor   = high-frequency, light buzz (the "whirr")
-#   left_trigger  = left trigger vibration (Xbox Elite / DualSense only)
-#   right_trigger = right trigger vibration (Xbox Elite / DualSense only)
 
 # --- Bite (fish strikes the hook) ---
-# Strong thump to simulate the fish hitting
-bite_left_motor = 100
-bite_right_motor = 50
-bite_left_trigger = 40
-bite_right_trigger = 50
-
-# Double-tap effect: two quick hits instead of one (true/false)
+bite_left_motor = 26
+bite_right_motor = 4
+bite_left_trigger = 5
+bite_right_trigger = 8
 bite_double_tap = true
-# Second hit strength relative to first (0-100)
-bite_double_tap_strength = 75
+bite_double_tap_strength = 3
 
-# --- Reeling (pulling the fish in) ---
-# Buzzy feel to simulate the reel working
-reel_left_motor = 45
-reel_right_motor = 100
-reel_left_trigger = 30
-reel_right_trigger = 50
+# --- Reel (drag ratchet click at max load) ---
+reel_left_motor = 35
+reel_right_motor = 20
+reel_left_trigger = 0
+reel_right_trigger = 0
+
+# --- Fight: Fish Force (background hum from hooked fish) ---
+fish_left_motor = 0
+fish_right_motor = 0
+fish_left_trigger = 0
+fish_right_trigger = 0
+
+# --- Fight: Rod Force (dynamic from rod strain) ---
+rod_left_motor = 0
+rod_right_motor = 0
+rod_left_trigger = 16
+rod_right_trigger = 0
+
+# --- Fight: Line Tension ---
+tension_left_motor = 0
+tension_right_motor = 0
+tension_left_trigger = 0
+tension_right_trigger = 60
+
+# --- Fight: Haptic Pulse (sharp hit from game) ---
+pulse_left_motor = 16
+pulse_right_motor = 19
+pulse_left_trigger = 0
+pulse_right_trigger = 0
 
 # --- General ---
-# Short test vibration when game starts (true/false)
 test_on_start = true
-
-# Verbose logging: log every vibration request with hex dumps (true/false)
-# Disable after debugging to reduce log size
 verbose_log = true

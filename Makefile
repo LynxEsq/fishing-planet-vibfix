@@ -7,9 +7,13 @@ CFLAGS = -arch $(ARCH) -mmacosx-version-min=$(MIN_MACOS) -Wno-deprecated-declara
 
 all: build/vibration_fix.dylib build/launch VibFix.app
 
-build/vibration_fix.dylib: src/vibration_fix.m
+VIBFIX_SRC = src/vibfix_config.c src/vibfix_hooks.c src/vibfix_output.m src/vibration_fix.m
+
+build/vibration_fix.dylib: $(VIBFIX_SRC) src/vibfix.h
 	mkdir -p build
-	clang -dynamiclib -o $@ $< -framework Foundation -framework GameController -framework IOKit $(CFLAGS)
+	clang -dynamiclib -o $@ $(VIBFIX_SRC) \
+		-framework Foundation -framework GameController -framework IOKit \
+		$(CFLAGS)
 	codesign -fs - $@
 
 build/launch: src/launch_wrapper.c

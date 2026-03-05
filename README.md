@@ -1,6 +1,6 @@
 # Fishing Planet — Xbox Controller Vibration Fix (macOS)
 
-Enables Xbox controller vibration in Fishing Planet on macOS. The game has built-in vibration support but Unity disables it on macOS. This mod hooks into Unity's runtime and redirects vibration commands through Steam Input API, with automatic fallback to direct IOKit HID if Steam Input is unavailable.
+Enables Xbox controller vibration in Fishing Planet on macOS. The game has built-in vibration support but Unity disables it on macOS. This mod hooks into Unity's IL2CPP runtime and redirects vibration commands through Steam Input API, with automatic fallback to direct IOKit HID. It also hooks fishing game methods via ARM64 inline code patching to provide real-time fight vibration — you feel the rod bending, line tension, and fish pulling through the controller's 4 motors.
 
 **[Русская версия ниже / Russian version below](#ru)**
 

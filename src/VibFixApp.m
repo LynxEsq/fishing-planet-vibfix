@@ -88,8 +88,8 @@ static NSDictionary *L(void) {
             @"steam_i":    @"Close Steam completely first.\nSteam overwrites config on exit.",
             @"bite_t":     @"BITE — FISH STRIKES THE HOOK",
             @"bite_d":     @"Strong vibration when a fish bites",
-            @"reel_t":     @"REEL — PULLING THE FISH IN",
-            @"reel_d":     @"Continuous vibration while reeling",
+            @"reel_t":     @"REEL — DRAG RATCHET CLICK",
+            @"reel_d":     @"Pulsing tuk-tuk when reel hits max drag load",
             @"heavy":      @"Heavy Rumble",   @"heavy_tip": @"Low-freq motor — deep thump",
             @"light":      @"Light Buzz",     @"light_tip": @"High-freq motor — light whirr",
             @"ltrig":      @"L2 Trigger Motor", @"trig_tip": @"Vibration in trigger buttons (Xbox Elite / DualSense only)",
@@ -99,6 +99,11 @@ static NSDictionary *L(void) {
             @"test":       @"Test vibration on start", @"test_tip": @"Short buzz when game launches",
             @"verbose":    @"Verbose logging",  @"verbose_tip": @"Log every vibration request",
             @"test_bite":  @"Test Bite", @"test_reel": @"Test Reel",
+            @"fish_t":     @"FISH FORCE", @"fish_d": @"Background vibration from hooked fish",
+            @"rod_t":      @"ROD FORCE",  @"rod_d":  @"Dynamic vibration from rod strain",
+            @"tens_t":     @"LINE TENSION", @"tens_d": @"Vibration from line tension",
+            @"pulse_t":    @"HAPTIC PULSE", @"pulse_d": @"Short burst when game triggers haptic",
+            @"test_fish":  @"Test", @"test_rod": @"Test", @"test_tens": @"Test", @"test_pulse": @"Test",
             @"ctrl_on":    @"Controller connected",
             @"ctrl_off":   @"No controller — connect Xbox via Bluetooth",
             @"no_ctrl_t":  @"No Controller", @"no_ctrl_i": @"Connect Xbox controller via Bluetooth first.",
@@ -115,8 +120,8 @@ static NSDictionary *L(void) {
             @"steam_i":    @"Сначала закройте Steam полностью.\nSteam перезаписывает настройки при выходе.",
             @"bite_t":     @"ПОКЛЁВКА",
             @"bite_d":     @"Сильная вибрация когда рыба клюёт",
-            @"reel_t":     @"ВЫВАЖИВАНИЕ",
-            @"reel_d":     @"Вибрация при подмотке и вытягивании",
+            @"reel_t":     @"КАТУШКА — ЩЕЛЧОК ФРИКЦИОНА",
+            @"reel_d":     @"Прерывистая вибрация тук-тук при максимальной нагрузке",
             @"heavy":      @"Тяжёлый мотор",  @"heavy_tip": @"Низкочастотный — глубокий удар",
             @"light":      @"Лёгкий мотор",   @"light_tip": @"Высокочастотный — лёгкое жужжание",
             @"ltrig":      @"Мотор L2 курка",  @"trig_tip":  @"Вибрация в курках (только Xbox Elite / DualSense)",
@@ -126,6 +131,11 @@ static NSDictionary *L(void) {
             @"test":       @"Тест вибрации при запуске", @"test_tip": @"Короткая вибрация при старте игры",
             @"verbose":    @"Подробный лог",    @"verbose_tip": @"Логировать каждый запрос вибрации",
             @"test_bite":  @"Тест поклёвки", @"test_reel": @"Тест вываживания",
+            @"fish_t":     @"СИЛА РЫБЫ", @"fish_d": @"Фоновая вибрация от пойманной рыбы",
+            @"rod_t":      @"НАГРУЗКА НА УДОЧКУ", @"rod_d": @"Динамическая вибрация от нагрузки удочки",
+            @"tens_t":     @"НАТЯЖЕНИЕ ЛЕСКИ", @"tens_d": @"Вибрация от натяжения лески",
+            @"pulse_t":    @"УДАР ПРИ ПОКЛЁВКЕ", @"pulse_d": @"Короткий удар при срабатывании игровой вибрации",
+            @"test_fish":  @"Тест", @"test_rod": @"Тест", @"test_tens": @"Тест", @"test_pulse": @"Тест",
             @"ctrl_on":    @"Контроллер подключён",
             @"ctrl_off":   @"Нет контроллера — подключите Xbox по Bluetooth",
             @"no_ctrl_t":  @"Нет контроллера", @"no_ctrl_i": @"Подключите Xbox-контроллер по Bluetooth.",
@@ -221,7 +231,7 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
 - (void)buildWindow {
     NSUInteger mask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                       NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskFullSizeContentView;
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,520,740)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1040,740)
                                               styleMask:mask backing:NSBackingStoreBuffered defer:NO];
     self.window.title = @"VibFix";
     self.window.titlebarAppearsTransparent = YES;
@@ -241,7 +251,8 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
 // ── Content (rebuilt on language change) ──
 - (void)buildContent {
     NSScrollView *sv = (NSScrollView *)self.window.contentView;
-    CGFloat W = 520;
+    CGFloat W = 1040;
+    CGFloat colW = 500;
 
     [self.sliders removeAllObjects];
     [self.sliderLabels removeAllObjects];
@@ -274,14 +285,13 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
         y += hH;
     }
 
-    // ── Controls ──
-    NSStackView *st = [NSStackView new];
-    st.orientation = NSUserInterfaceLayoutOrientationVertical;
-    st.alignment = NSLayoutAttributeLeading;
-    st.spacing = 7;
-    st.edgeInsets = NSEdgeInsetsMake(6, 28, 20, 28);
+    // ── Top bar (full width) ──
+    NSStackView *topSt = [NSStackView new];
+    topSt.orientation = NSUserInterfaceLayoutOrientationVertical;
+    topSt.alignment = NSLayoutAttributeLeading;
+    topSt.spacing = 7;
+    topSt.edgeInsets = NSEdgeInsetsMake(6, 28, 10, 28);
 
-    // Language toggle + Status
     self.langBtn = [NSButton buttonWithTitle:(g_lang==0 ? @"RU" : @"EN")
                                       target:self action:@selector(toggleLang:)];
     self.langBtn.wantsLayer = YES;
@@ -289,23 +299,33 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     self.statusLabel = makeLabel(@"", 12, FP_DIM, NO);
     NSStackView *topRow = [NSStackView stackViewWithViews:@[self.statusLabel, self.langBtn]];
     topRow.spacing = 8;
-    [st addArrangedSubview:topRow];
+    [topSt addArrangedSubview:topRow];
 
-    // Buttons
     self.installBtn = [self btn:S(@"install") action:@selector(doInstall:)];
     self.uninstallBtn = [self btn:S(@"uninstall") action:@selector(doUninstall:)];
     NSStackView *br = [NSStackView stackViewWithViews:@[self.installBtn, self.uninstallBtn]];
     br.spacing = 12;
-    [st addArrangedSubview:br];
+    [topSt addArrangedSubview:br];
 
-    // Controller status
     self.ctrlLabel = makeLabel(@"", 11, FP_DIM, NO);
-    [st addArrangedSubview:self.ctrlLabel];
+    [topSt addArrangedSubview:self.ctrlLabel];
     [self refreshCtrlStatus];
+
+    NSSize topFit = [topSt fittingSize];
+    topSt.frame = NSMakeRect(0, y, W, topFit.height);
+    [doc addSubview:topSt];
+    y += topFit.height;
+
+    // ── LEFT column: Bite + Reel + General ──
+    NSStackView *st = [NSStackView new];
+    st.orientation = NSUserInterfaceLayoutOrientationVertical;
+    st.alignment = NSLayoutAttributeLeading;
+    st.spacing = 7;
+    st.edgeInsets = NSEdgeInsetsMake(6, 28, 20, 14);
 
     [st addArrangedSubview:[self sep]];
 
-    // ── Bite ──
+    // Bite
     NSButton *testBiteBtn = [self btn:S(@"test_bite") action:@selector(testBite:)];
     testBiteBtn.font = [NSFont systemFontOfSize:10];
     NSStackView *biteHeader = [NSStackView stackViewWithViews:@[
@@ -322,7 +342,7 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
 
     [st addArrangedSubview:[self sep]];
 
-    // ── Reel ──
+    // Reel
     NSButton *testReelBtn = [self btn:S(@"test_reel") action:@selector(testReel:)];
     testReelBtn.font = [NSFont systemFontOfSize:10];
     NSStackView *reelHeader = [NSStackView stackViewWithViews:@[
@@ -337,7 +357,7 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
 
     [st addArrangedSubview:[self sep]];
 
-    // ── General ──
+    // General
     [st addArrangedSubview:[self chk:S(@"test") key:@"test_on_start" on:YES tip:S(@"test_tip")]];
     [st addArrangedSubview:[self chk:S(@"verbose") key:@"verbose_log" on:YES tip:S(@"verbose_tip")]];
     [st addArrangedSubview:[self sep]];
@@ -345,15 +365,95 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     NSButton *saveBtn = [self btn:S(@"save") action:@selector(doSave:)];
     [st addArrangedSubview:saveBtn];
 
-    NSSize fit = [st fittingSize];
-    st.frame = NSMakeRect(0, y, W, fit.height);
+    // ── RIGHT column: Fight settings ──
+    NSStackView *rt = [NSStackView new];
+    rt.orientation = NSUserInterfaceLayoutOrientationVertical;
+    rt.alignment = NSLayoutAttributeLeading;
+    rt.spacing = 7;
+    rt.edgeInsets = NSEdgeInsetsMake(6, 14, 20, 28);
+
+    [rt addArrangedSubview:[self sep]];
+
+    // Fish Force
+    NSButton *testFishBtn = [self btn:S(@"test_fish") action:@selector(testFish:)];
+    testFishBtn.font = [NSFont systemFontOfSize:10];
+    NSStackView *fishHeader = [NSStackView stackViewWithViews:@[
+        makeLabel(S(@"fish_t"), 11, FP_ACCENT, YES), testFishBtn]];
+    fishHeader.spacing = 8;
+    [rt addArrangedSubview:fishHeader];
+    [rt addArrangedSubview:makeLabel(S(@"fish_d"), 10, FP_DIM, NO)];
+    [rt addArrangedSubview:[self sl:S(@"heavy") key:@"fish_left_motor" val:5 tip:S(@"heavy_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"light") key:@"fish_right_motor" val:10 tip:S(@"light_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"ltrig") key:@"fish_left_trigger" val:0 tip:S(@"trig_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"rtrig") key:@"fish_right_trigger" val:5 tip:S(@"trig_tip")]];
+
+    [rt addArrangedSubview:[self sep]];
+
+    // Rod Force
+    NSButton *testRodBtn = [self btn:S(@"test_rod") action:@selector(testRod:)];
+    testRodBtn.font = [NSFont systemFontOfSize:10];
+    NSStackView *rodHeader = [NSStackView stackViewWithViews:@[
+        makeLabel(S(@"rod_t"), 11, FP_ACCENT, YES), testRodBtn]];
+    rodHeader.spacing = 8;
+    [rt addArrangedSubview:rodHeader];
+    [rt addArrangedSubview:makeLabel(S(@"rod_d"), 10, FP_DIM, NO)];
+    [rt addArrangedSubview:[self sl:S(@"heavy") key:@"rod_left_motor" val:20 tip:S(@"heavy_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"light") key:@"rod_right_motor" val:40 tip:S(@"light_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"ltrig") key:@"rod_left_trigger" val:10 tip:S(@"trig_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"rtrig") key:@"rod_right_trigger" val:20 tip:S(@"trig_tip")]];
+
+    [rt addArrangedSubview:[self sep]];
+
+    // Line Tension
+    NSButton *testTensBtn = [self btn:S(@"test_tens") action:@selector(testTension:)];
+    testTensBtn.font = [NSFont systemFontOfSize:10];
+    NSStackView *tensHeader = [NSStackView stackViewWithViews:@[
+        makeLabel(S(@"tens_t"), 11, FP_ACCENT, YES), testTensBtn]];
+    tensHeader.spacing = 8;
+    [rt addArrangedSubview:tensHeader];
+    [rt addArrangedSubview:makeLabel(S(@"tens_d"), 10, FP_DIM, NO)];
+    [rt addArrangedSubview:[self sl:S(@"heavy") key:@"tension_left_motor" val:10 tip:S(@"heavy_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"light") key:@"tension_right_motor" val:20 tip:S(@"light_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"ltrig") key:@"tension_left_trigger" val:5 tip:S(@"trig_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"rtrig") key:@"tension_right_trigger" val:10 tip:S(@"trig_tip")]];
+
+    [rt addArrangedSubview:[self sep]];
+
+    // Haptic Pulse
+    NSButton *testPulseBtn = [self btn:S(@"test_pulse") action:@selector(testPulse:)];
+    testPulseBtn.font = [NSFont systemFontOfSize:10];
+    NSStackView *pulseHeader = [NSStackView stackViewWithViews:@[
+        makeLabel(S(@"pulse_t"), 11, FP_ACCENT, YES), testPulseBtn]];
+    pulseHeader.spacing = 8;
+    [rt addArrangedSubview:pulseHeader];
+    [rt addArrangedSubview:makeLabel(S(@"pulse_d"), 10, FP_DIM, NO)];
+    [rt addArrangedSubview:[self sl:S(@"heavy") key:@"pulse_left_motor" val:60 tip:S(@"heavy_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"light") key:@"pulse_right_motor" val:30 tip:S(@"light_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"ltrig") key:@"pulse_left_trigger" val:20 tip:S(@"trig_tip")]];
+    [rt addArrangedSubview:[self sl:S(@"rtrig") key:@"pulse_right_trigger" val:30 tip:S(@"trig_tip")]];
+
+    // ── Place columns side by side ──
+    NSSize leftFit = [st fittingSize];
+    NSSize rightFit = [rt fittingSize];
+    CGFloat colHeight = leftFit.height > rightFit.height ? leftFit.height : rightFit.height;
+
+    st.frame = NSMakeRect(0, y, colW, colHeight);
+    rt.frame = NSMakeRect(colW, y, colW, colHeight);
+
+    NSView *divider = [[NSView alloc] initWithFrame:NSMakeRect(colW, y + 10, 1, colHeight - 20)];
+    divider.wantsLayer = YES;
+    divider.layer.backgroundColor = [FP_SEP CGColor];
+
     [doc addSubview:st];
-    y += fit.height;
+    [doc addSubview:divider];
+    [doc addSubview:rt];
+    y += colHeight;
+
     doc.frame = NSMakeRect(0, 0, W, y);
 
     // Resize window to fit content
     NSRect frame = self.window.frame;
-    CGFloat newH = y;
+    CGFloat newH = y < 900 ? y : 900;
     frame.origin.y += frame.size.height - newH;
     frame.size.height = newH;
     [self.window setFrame:frame display:YES animate:NO];
@@ -497,6 +597,26 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
     [c appendFormat:@"reel_right_motor = %d\n", [self iv:@"reel_right_motor"]];
     [c appendFormat:@"reel_left_trigger = %d\n", [self iv:@"reel_left_trigger"]];
     [c appendFormat:@"reel_right_trigger = %d\n", [self iv:@"reel_right_trigger"]];
+    [c appendString:@"\n# --- Fight: Fish Force (background hum from hooked fish) ---\n"];
+    [c appendFormat:@"fish_left_motor = %d\n", [self iv:@"fish_left_motor"]];
+    [c appendFormat:@"fish_right_motor = %d\n", [self iv:@"fish_right_motor"]];
+    [c appendFormat:@"fish_left_trigger = %d\n", [self iv:@"fish_left_trigger"]];
+    [c appendFormat:@"fish_right_trigger = %d\n", [self iv:@"fish_right_trigger"]];
+    [c appendString:@"\n# --- Fight: Rod Force (dynamic from rod strain) ---\n"];
+    [c appendFormat:@"rod_left_motor = %d\n", [self iv:@"rod_left_motor"]];
+    [c appendFormat:@"rod_right_motor = %d\n", [self iv:@"rod_right_motor"]];
+    [c appendFormat:@"rod_left_trigger = %d\n", [self iv:@"rod_left_trigger"]];
+    [c appendFormat:@"rod_right_trigger = %d\n", [self iv:@"rod_right_trigger"]];
+    [c appendString:@"\n# --- Fight: Line Tension ---\n"];
+    [c appendFormat:@"tension_left_motor = %d\n", [self iv:@"tension_left_motor"]];
+    [c appendFormat:@"tension_right_motor = %d\n", [self iv:@"tension_right_motor"]];
+    [c appendFormat:@"tension_left_trigger = %d\n", [self iv:@"tension_left_trigger"]];
+    [c appendFormat:@"tension_right_trigger = %d\n", [self iv:@"tension_right_trigger"]];
+    [c appendString:@"\n# --- Fight: Haptic Pulse (sharp hit from game) ---\n"];
+    [c appendFormat:@"pulse_left_motor = %d\n", [self iv:@"pulse_left_motor"]];
+    [c appendFormat:@"pulse_right_motor = %d\n", [self iv:@"pulse_right_motor"]];
+    [c appendFormat:@"pulse_left_trigger = %d\n", [self iv:@"pulse_left_trigger"]];
+    [c appendFormat:@"pulse_right_trigger = %d\n", [self iv:@"pulse_right_trigger"]];
     [c appendString:@"\n# --- General ---\n"];
     [c appendFormat:@"test_on_start = %@\n", [self bv:@"test_on_start"]];
     [c appendFormat:@"verbose_log = %@\n", [self bv:@"verbose_log"]];
@@ -619,10 +739,48 @@ static NSTextField *makeLabel(NSString *text, CGFloat size, NSColor *color, BOOL
 }
 
 - (void)testReel:(id)sender {
-    [self rumblePulse:[self motorVal:@"reel_left_trigger"]
-                   rt:[self motorVal:@"reel_right_trigger"]
-                 left:[self motorVal:@"reel_left_motor"]
-                right:[self motorVal:@"reel_right_motor"] ms:1000];
+    if (!g_hid_ready) { [self alert:S(@"no_ctrl_t") info:S(@"no_ctrl_i")]; return; }
+    uint8_t L = [self motorVal:@"reel_left_motor"];
+    uint8_t R = [self motorVal:@"reel_right_motor"];
+    uint8_t LT = [self motorVal:@"reel_left_trigger"];
+    uint8_t RT = [self motorVal:@"reel_right_trigger"];
+    // Simulate tuk-tuk pulse pattern (4 clicks, ~6Hz)
+    dispatch_async(dispatch_get_global_queue(0,0), ^{
+        for (int i = 0; i < 4; i++) {
+            send_hid_rumble(LT, RT, L, R);
+            usleep(80000);
+            send_hid_rumble(0, 0, 0, 0);
+            usleep(70000);
+        }
+    });
+}
+
+- (void)testFish:(id)sender {
+    [self rumblePulse:[self motorVal:@"fish_left_trigger"]
+                   rt:[self motorVal:@"fish_right_trigger"]
+                 left:[self motorVal:@"fish_left_motor"]
+                right:[self motorVal:@"fish_right_motor"] ms:1000];
+}
+
+- (void)testRod:(id)sender {
+    [self rumblePulse:[self motorVal:@"rod_left_trigger"]
+                   rt:[self motorVal:@"rod_right_trigger"]
+                 left:[self motorVal:@"rod_left_motor"]
+                right:[self motorVal:@"rod_right_motor"] ms:1000];
+}
+
+- (void)testTension:(id)sender {
+    [self rumblePulse:[self motorVal:@"tension_left_trigger"]
+                   rt:[self motorVal:@"tension_right_trigger"]
+                 left:[self motorVal:@"tension_left_motor"]
+                right:[self motorVal:@"tension_right_motor"] ms:1000];
+}
+
+- (void)testPulse:(id)sender {
+    [self rumblePulse:[self motorVal:@"pulse_left_trigger"]
+                   rt:[self motorVal:@"pulse_right_trigger"]
+                 left:[self motorVal:@"pulse_left_motor"]
+                right:[self motorVal:@"pulse_right_motor"] ms:400];
 }
 
 - (void)testMotor:(NSButton *)sender {
