@@ -17,6 +17,9 @@ static void *init_thread(void *arg) {
             viblog("IL2CPP ready (attempt %d)", i + 1);
             install_hooks();
 
+            // Start fish info HUD overlay
+            initHUD();
+
             // Start fight vibration thread (reads fishing hook data at 20Hz)
             pthread_t fight_t;
             pthread_create(&fight_t, NULL, fight_vibration_thread, NULL);
@@ -82,6 +85,7 @@ void initControllerMonitoring(void) {
 __attribute__((constructor))
 static void vibfix_init(void) {
     find_install_dir();
+    install_crash_handler();
 
     viblog("=== Vibration Fix v" VERSION " loaded (pid=%d) ===", getpid());
     viblog("Install dir: %s", g_install_dir);

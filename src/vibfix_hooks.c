@@ -504,6 +504,8 @@ static int install_inline_hook(void *target, void *hook, void **orig_out) {
 
 static void install_fishing_hooks(void);
 
+static void scan_classes_for_keywords(const char **keywords, int num_keywords);
+
 void install_hooks(void) {
     viblog("--- Installing hooks ---");
 
@@ -566,6 +568,11 @@ void install_hooks(void) {
 
     // Finalize inline hook trampolines — switch pool RW → RX
     finalize_trampolines();
+
+    // Class scan disabled — results saved in docs/il2cpp_class_scan.txt
+    // To re-enable, uncomment the block below:
+    // const char *scan_keywords[] = { "Fish", "Rod", "Reel", "Line", ... };
+    // scan_classes_for_keywords(scan_keywords, sizeof(scan_keywords)/sizeof(scan_keywords[0]));
 }
 
 // ============ Fishing Vibration Hooks ============
@@ -573,14 +580,103 @@ void install_hooks(void) {
 // IL2CPP instance method ABI: ReturnType func(void *this, MethodInfo *method)
 
 // Globals for fishing state (read by hooks, consumed by fight vibration thread)
-float g_line_tension = 0.0f;      // from GetLineTensionFactor (0..~32)
+float g_line_tension = 0.0f;      // from GetLineTensionFactor (0..~32) — instantaneous
+float g_line_tension_peak = 0.0f; // peak-hold: max since last decay (survives multi-rod overwrite)
 float g_fish_force = 0.0f;        // from Fish1stBehaviour.get_CurrentForce
 float g_rod_force = 0.0f;         // from Rod1stBehaviour.GetRodForce (0..~103)
 float g_reel_speed = 0.0f;        // from Reel1stBehaviour.get_CurrentRelativeSpeed (0..1)
+float g_reel_speed_peak = 0.0f;   // peak-hold for reel speed
 float g_reel_force = 0.0f;        // from Reel1stBehaviour.get_CurrentForce (load on reel)
+float g_reel_force_peak = 0.0f;   // peak-hold for reel force
 int   g_fishing_hooks_active = 0; // how many hooks installed
 volatile uint32_t g_fish_force_tick = 0;  // incremented by get_CurrentForce hook
 volatile int g_shutting_down = 0;         // set on process exit
+
+// HUD data
+FishHUDData g_hud_data = {0};
+volatile void *g_fish_thisptr = NULL;
+
+// Multi-fish slot tracking
+FishSlot g_fish_slots[MAX_FISH_SLOTS] = {0};
+int g_active_slot = -1;
+volatile uint32_t g_slot_tick = 0;
+
+static int find_slot_by_ai(void *ai) {
+    for (int i = 0; i < MAX_FISH_SLOTS; i++)
+        if (g_fish_slots[i].used && g_fish_slots[i].ai_ptr == ai) return i;
+    return -1;
+}
+
+static int find_slot_by_fish(void *fish) {
+    for (int i = 0; i < MAX_FISH_SLOTS; i++)
+        if (g_fish_slots[i].used && g_fish_slots[i].fish_ptr == fish) return i;
+    return -1;
+}
+
+static int alloc_slot(void *ai, void *fish) {
+    for (int i = 0; i < MAX_FISH_SLOTS; i++)
+        if (!g_fish_slots[i].used) {
+            memset(&g_fish_slots[i], 0, sizeof(FishSlot));
+            g_fish_slots[i].ai_ptr = ai;
+            g_fish_slots[i].fish_ptr = fish;
+            g_fish_slots[i].used = 1;
+            viblog("[SLOT] New fish slot #%d: ai=%p fish=%p", i, ai, fish);
+            return i;
+        }
+    // Evict oldest
+    int oldest = 0;
+    uint32_t oldest_tick = UINT32_MAX;
+    for (int i = 0; i < MAX_FISH_SLOTS; i++)
+        if (g_fish_slots[i].last_update_tick < oldest_tick) {
+            oldest_tick = g_fish_slots[i].last_update_tick;
+            oldest = i;
+        }
+    viblog("[SLOT] Evicting slot #%d for ai=%p fish=%p", oldest, ai, fish);
+    memset(&g_fish_slots[oldest], 0, sizeof(FishSlot));
+    g_fish_slots[oldest].ai_ptr = ai;
+    g_fish_slots[oldest].fish_ptr = fish;
+    g_fish_slots[oldest].used = 1;
+    return oldest;
+}
+
+// HUD getter method pointers (resolved, not hooked — called from within hooks)
+typedef float (*hud_ff_t)(void *, void *);
+typedef int   (*hud_fi_t)(void *, void *);
+typedef void *(*hud_fp_t)(void *, void *);
+
+static struct {
+    hud_ff_t maxForce;
+    hud_ff_t relativeForce;
+    hud_ff_t appliedForce;
+    hud_ff_t distanceToTackle;
+    hud_fi_t isBig;
+    hud_fi_t isHuge;
+    hud_fi_t isSmall;
+    hud_fi_t isHooked;
+    hud_fi_t isPassive;
+    hud_fi_t state;
+    // Extended Fish1stBehaviour (direct method calls — only safe ones)
+    hud_ff_t retreatThreshold;
+    hud_ff_t biteTime;
+    hud_fi_t isTasting;
+    hud_fi_t isInWater;
+    // Other extended fields read via direct memory access from FishAi sub-object
+    hud_fp_t caughtFish;
+    hud_ff_t mass;
+    hud_ff_t fbLength;
+    // ObjectModel.CaughtFish
+    hud_fp_t cf_getFish;
+    // ObjectModel.Fish
+    hud_fp_t om_getName;
+    hud_ff_t om_getWeight;
+    hud_ff_t om_getLength;
+    hud_fi_t om_isTrophy;
+    hud_fi_t om_isUnique;
+    hud_fi_t om_isMonster;
+    hud_ff_t om_getStamina;
+    hud_ff_t om_getForce;
+    hud_ff_t om_getSpeed;
+} g_hud_fn = {0};
 
 // Original method pointers
 typedef float (*il2cpp_float_getter_t)(void *thisptr, void *methodInfo);
@@ -592,12 +688,168 @@ static il2cpp_float_getter_t orig_GetRodForce = NULL;
 static il2cpp_void_method_t  orig_TriggerHapticPulse = NULL;
 static il2cpp_float_getter_t orig_GetReelRelativeSpeed = NULL;
 typedef void (*il2cpp_void_fn_t)(void *thisptr, void *methodInfo);
+typedef void (*fishai_update_fn_t)(void *thisptr, float deltaTime, void *methodInfo);
+static fishai_update_fn_t orig_FishAiUpdate = NULL;
 static il2cpp_void_fn_t orig_CalculateAppliedForce = NULL;
+
+// --- Hook: FishAi.Update — captures bite phase data for ALL fish ---
+static void hook_FishAiUpdate(void *thisptr, float deltaTime, void *methodInfo) {
+    orig_FishAiUpdate(thisptr, deltaTime, methodInfo);
+
+    uint8_t *ai = (uint8_t *)thisptr;
+
+    // Resolve bite getters once
+    typedef float (*ai_getter_f)(void *, void *);
+    typedef int (*ai_getter_i)(void *, void *);
+    static ai_getter_f fn_biteTime = NULL, fn_maxBiteTime = NULL;
+    static ai_getter_i fn_isTasting = NULL;
+    static int bite_resolved = 0;
+    if (!bite_resolved) {
+        fn_biteTime = (ai_getter_f)find_method_addr_ns("FishAI", "Fish1stBehaviour", "get_BiteTime", 0);
+        fn_maxBiteTime = (ai_getter_f)find_method_addr_ns("FishAI", "Fish1stBehaviour", "get_FishAiMaxBiteTime", 0);
+        fn_isTasting = (ai_getter_i)find_method_addr_ns("FishAI", "FishAi", "get_IsTasting", 0);
+        viblog("[BITE] getters: bite=%p maxBite=%p tasting=%p",
+               (void*)fn_biteTime, (void*)fn_maxBiteTime, (void*)fn_isTasting);
+        bite_resolved = 1;
+    }
+
+    // Find Fish1stBehaviour owner
+    // FishAi.0x20 may be FishController (not Fish1stBehaviour directly).
+    // Strategy: check 0x20 back-pointer first; if that fails, scan FishController
+    // fields for a pointer whose object has FishAi back-ref at 0x1a0.
+    void *owner = *(void **)(ai + 0x20);
+    void *fish1st = NULL;
+    static int fish1st_via_controller_offset = -1;  // cached offset within FishController
+
+    if (owner) {
+        // Direct path: owner IS Fish1stBehaviour (back-pointer check)
+        void *back_ai = *(void **)((uint8_t *)owner + 0x1a0);
+        if (back_ai == thisptr) {
+            fish1st = owner;
+        } else if (fish1st_via_controller_offset > 0) {
+            // Use cached offset: FishController + offset → Fish1stBehaviour
+            void *candidate = *(void **)((uint8_t *)owner + fish1st_via_controller_offset);
+            if (candidate) {
+                void *cand_ai = *(void **)((uint8_t *)candidate + 0x1a0);
+                if (cand_ai == thisptr) fish1st = candidate;
+            }
+        } else if (fish1st_via_controller_offset == -1) {
+            // One-time scan: FishController fields for Fish1stBehaviour
+            // Fish1stBehaviour has back-pointer to FishAi at 0x1a0
+            if (api_class_get_name) {
+                void *klass = *(void **)owner;
+                const char *cn = klass ? api_class_get_name(klass) : "?";
+                viblog("[BITE] Owner@0x20 class=%s, scanning for Fish1stBehaviour...", cn);
+            }
+            for (int off = 0x18; off < 0x200; off += 8) {
+                void *candidate = *(void **)((uint8_t *)owner + off);
+                if (!candidate) continue;
+                // Probe: does candidate+0x1a0 point back to our FishAi?
+                // Use vm_read to safely probe memory
+                vm_size_t sz = 0;
+                void *buf = NULL;
+                kern_return_t kr = vm_read(mach_task_self(),
+                    (vm_address_t)((uint8_t *)candidate + 0x1a0), 8,
+                    (vm_offset_t *)&buf, (mach_msg_type_number_t *)&sz);
+                if (kr == KERN_SUCCESS && sz >= 8) {
+                    void *cand_ai = *(void **)buf;
+                    vm_deallocate(mach_task_self(), (vm_address_t)buf, sz);
+                    if (cand_ai == thisptr) {
+                        fish1st = candidate;
+                        fish1st_via_controller_offset = off;
+                        viblog("[BITE] Found Fish1stBehaviour at FishController+0x%x → %p", off, candidate);
+                        break;
+                    }
+                } else if (kr == KERN_SUCCESS) {
+                    vm_deallocate(mach_task_self(), (vm_address_t)buf, sz);
+                }
+            }
+            if (!fish1st) {
+                viblog("[BITE] Could not find Fish1stBehaviour via FishController scan");
+                fish1st_via_controller_offset = -2;  // mark as failed, don't retry
+            }
+        }
+    }
+
+    // If we still can't find Fish1stBehaviour, create slot with AI only
+    // (allows pre-hook fish to appear in HUD with limited data)
+    int ai_only = 0;
+    if (!fish1st) {
+        ai_only = 1;
+    }
+
+    // Find or allocate slot for this fish
+    int idx = find_slot_by_ai(thisptr);
+    if (idx < 0) idx = alloc_slot(thisptr, fish1st);
+
+    FishSlot *slot = &g_fish_slots[idx];
+    FishHUDData *d = &slot->hud;
+
+    // Update fish_ptr if it changed (object reuse or first discovery)
+    if (fish1st && slot->fish_ptr != fish1st) slot->fish_ptr = fish1st;
+
+    // Bite mechanics (from FishAi directly — always available)
+    d->striked      = *(uint8_t *)(ai + 0x160);
+    d->endOfTaste   = *(uint8_t *)(ai + 0x1c8);
+    d->amountTastes = *(int32_t *)(ai + 0x18c);
+    d->countTastes  = *(int32_t *)(ai + 0x190);
+
+    // Force from backing fields (for summary — no getter call needed)
+    slot->current_force = *(float *)(ai + 0x88);   // CurrentForce
+    d->minForce         = *(float *)(ai + 0x8c);
+
+    // Key getters via Fish1stBehaviour owner (for summary display)
+    // Only call if we have fish1st (these methods need Fish1stBehaviour thisptr)
+    if (!ai_only) {
+        if (g_hud_fn.maxForce)      d->maxForce      = g_hud_fn.maxForce(fish1st, NULL);
+        if (g_hud_fn.relativeForce) d->relativeForce  = g_hud_fn.relativeForce(fish1st, NULL);
+        if (g_hud_fn.isHooked)      d->isHooked       = g_hud_fn.isHooked(fish1st, NULL) & 0xFF;
+        if (g_hud_fn.isPassive)     d->isPassive       = g_hud_fn.isPassive(fish1st, NULL) & 0xFF;
+
+        // BiteTime via Fish1stBehaviour
+        if (fn_biteTime)    d->biteTime    = fn_biteTime(fish1st, NULL);
+        if (fn_maxBiteTime) d->maxBiteTime = fn_maxBiteTime(fish1st, NULL);
+    }
+    if (fn_isTasting)   d->isTasting   = fn_isTasting(thisptr, NULL) & 0xFF;
+
+    // FSM state name
+    void *fsm = *(void **)(ai + 0x158);
+    if (fsm) {
+        void *cur_state = *(void **)((uint8_t *)fsm + 0x10);
+        if (cur_state && api_class_get_name) {
+            void *klass = *(void **)cur_state;
+            if (klass) {
+                const char *sname = api_class_get_name(klass);
+                if (sname) {
+                    // Log bite-phase state transitions
+                    static char prev_bite_state[48] = {0};
+                    if (strcmp(sname, prev_bite_state) != 0) {
+                        viblog("[BITE] AI: %s -> %s taste=%d/%d striked=%d bite=%.1f/%.1f tasting=%d",
+                               prev_bite_state[0] ? prev_bite_state : "?", sname,
+                               d->countTastes, d->amountTastes,
+                               d->striked,
+                               d->biteTime, d->maxBiteTime,
+                               d->isTasting);
+                        strncpy(prev_bite_state, sname, sizeof(prev_bite_state) - 1);
+                    }
+                    strncpy(d->aiStateName, sname, sizeof(d->aiStateName) - 1);
+                    d->aiStateName[sizeof(d->aiStateName) - 1] = 0;
+                }
+            }
+        }
+    }
+
+    slot->last_update_tick = ++g_slot_tick;
+
+    // Backward compat: sync active slot to g_hud_data
+    if (slot->active) g_hud_data = *d;
+}
 
 // --- Hook: Line1stBehaviour.GetLineTensionFactor ---
 static float hook_GetLineTensionFactor(void *thisptr, void *methodInfo) {
     float val = orig_GetLineTensionFactor(thisptr, methodInfo);
     g_line_tension = val;
+    if (val > g_line_tension_peak) g_line_tension_peak = val;
 
     static int count = 0;
     count++;
@@ -606,16 +858,250 @@ static float hook_GetLineTensionFactor(void *thisptr, void *methodInfo) {
     return val;
 }
 
-// --- Hook: IFishController.get_CurrentForce ---
+// Il2CppString → C string helper
+static void il2cpp_string_to_buf(void *str, char *buf, int bufsize) {
+    if (!str) { buf[0] = 0; return; }
+    int32_t len = *(int32_t *)((uint8_t *)str + 0x10);
+    uint16_t *chars = (uint16_t *)((uint8_t *)str + 0x14);
+    int n = len < bufsize - 1 ? len : bufsize - 1;
+    for (int i = 0; i < n; i++)
+        buf[i] = (chars[i] < 128) ? (char)chars[i] : '?';
+    buf[n] = 0;
+}
+
+// --- Hook: IFishController.get_CurrentForce (active fish only) ---
 static float hook_GetCurrentForce(void *thisptr, void *methodInfo) {
     float val = orig_GetCurrentForce(thisptr, methodInfo);
-    g_fish_force = val;
+    g_fish_force = val;          // for fight vibration thread
     g_fish_force_tick++;
+    g_fish_thisptr = thisptr;
 
     static int count = 0;
+    static void *prev_thisptr = NULL;
     count++;
+
+    int is_new_fish = (thisptr != prev_thisptr);
+    if (is_new_fish) prev_thisptr = thisptr;
+
     if (count <= 50 || count % 200 == 0)
         viblog("[FISH] FishForce=%.4f (#%d)", val, count);
+
+    // Find or create slot for this Fish1stBehaviour
+    int idx = find_slot_by_fish(thisptr);
+    if (idx < 0) {
+        void *ai = *(void **)((uint8_t *)thisptr + 0x1a0);
+        idx = alloc_slot(ai, thisptr);
+    }
+
+    // Mark as active
+    if (g_active_slot != idx) {
+        if (g_active_slot >= 0 && g_active_slot < MAX_FISH_SLOTS)
+            g_fish_slots[g_active_slot].active = 0;
+        g_active_slot = idx;
+        g_fish_slots[idx].active = 1;
+        viblog("[SLOT] Active fish changed to slot #%d (fish=%p force=%.1f)", idx, thisptr, val);
+    }
+
+    FishSlot *slot = &g_fish_slots[idx];
+    FishHUDData *d = &slot->hud;
+    slot->current_force = val;
+    slot->last_update_tick = ++g_slot_tick;
+
+    // Collect detailed HUD data: every 5th call normally, IMMEDIATELY on new fish
+    if (thisptr && ((count % 5 == 0) || is_new_fish)) {
+
+        // Save previous state for transition detection
+        static int prev_state = -999;
+        static int prev_hooked = -999;
+        static int prev_passive = -999;
+
+        // Call getters → write to slot->hud
+        if (g_hud_fn.maxForce) d->maxForce = g_hud_fn.maxForce(thisptr, NULL);
+        if (g_hud_fn.relativeForce) d->relativeForce = g_hud_fn.relativeForce(thisptr, NULL);
+        if (g_hud_fn.appliedForce) d->appliedForce = g_hud_fn.appliedForce(thisptr, NULL);
+        if (g_hud_fn.isBig) d->isBig = g_hud_fn.isBig(thisptr, NULL) & 0xFF;
+        if (g_hud_fn.isHuge) d->isHuge = g_hud_fn.isHuge(thisptr, NULL) & 0xFF;
+        if (g_hud_fn.isSmall) d->isSmall = g_hud_fn.isSmall(thisptr, NULL) & 0xFF;
+        if (g_hud_fn.isHooked) d->isHooked = g_hud_fn.isHooked(thisptr, NULL) & 0xFF;
+        if (g_hud_fn.isPassive) d->isPassive = g_hud_fn.isPassive(thisptr, NULL) & 0xFF;
+
+        int64_t state_raw = 0;
+        if (g_hud_fn.state) {
+            typedef int64_t (*state_fn_t)(void *, void *);
+            state_raw = ((state_fn_t)g_hud_fn.state)(thisptr, NULL);
+            d->state = (int)state_raw;
+        }
+
+        if (g_hud_fn.mass) d->mass = g_hud_fn.mass(thisptr, NULL);
+        else d->mass = 0;
+        d->fishBehaviourLength = 0;
+
+        if (g_hud_fn.retreatThreshold) d->retreatThreshold = g_hud_fn.retreatThreshold(thisptr, NULL);
+        if (g_hud_fn.biteTime) d->biteTime = g_hud_fn.biteTime(thisptr, NULL);
+        if (g_hud_fn.isTasting) d->isTasting = g_hud_fn.isTasting(thisptr, NULL) & 0xFF;
+        if (g_hud_fn.isInWater) d->isInWater = g_hud_fn.isInWater(thisptr, NULL) & 0xFF;
+
+        // Read FishAi sub-object fields
+        uint8_t *ai = *(uint8_t **)((uint8_t *)thisptr + 0x1a0);
+        if (ai) {
+            d->fishVelocity = *(float *)(ai + 0x48);
+            d->fishMaxSpeed = *(float *)(ai + 0x9c);
+            d->minForce = *(float *)(ai + 0x8c);
+            d->playerForce = *(float *)(ai + 0x12c);
+            d->isFishSwimming = *(uint8_t *)(ai + 0x64);
+            d->isShocked = *(uint8_t *)(ai + 0x98);
+            if (!d->isShocked)
+                d->isShocked = *(uint8_t *)((uint8_t *)thisptr + 0x1cc);
+
+            typedef float (*ai_float_getter_t)(void *, void *);
+
+            d->striked = *(uint8_t *)(ai + 0x160);
+            d->endOfTaste = *(uint8_t *)(ai + 0x1c8);
+            d->amountTastes = *(int32_t *)(ai + 0x18c);
+            d->countTastes = *(int32_t *)(ai + 0x190);
+
+            static ai_float_getter_t fn_maxBiteTime = NULL;
+            static int mbt_resolved = 0;
+            if (!mbt_resolved) {
+                fn_maxBiteTime = (ai_float_getter_t)find_method_addr_ns("FishAI", "FishAi", "get_MaxBiteTime", 0);
+                viblog("[HUD] FishAi.get_MaxBiteTime: %p", (void*)fn_maxBiteTime);
+                mbt_resolved = 1;
+            }
+            if (fn_maxBiteTime) d->maxBiteTime = fn_maxBiteTime(ai, NULL);
+
+            void *fsm = *(void **)(ai + 0x158);
+            if (fsm) {
+                void *cur_state = *(void **)((uint8_t *)fsm + 0x10);
+                if (cur_state && api_class_get_name) {
+                    void *klass = *(void **)cur_state;
+                    if (klass) {
+                        const char *sname = api_class_get_name(klass);
+                        if (sname) {
+                            strncpy(d->aiStateName, sname, sizeof(d->aiStateName) - 1);
+                            d->aiStateName[sizeof(d->aiStateName) - 1] = 0;
+                        }
+                    }
+                }
+            }
+
+            static ai_float_getter_t fn_stopFight = NULL, fn_escape = NULL, fn_maneuver = NULL;
+            static int prob_resolved = 0;
+            if (!prob_resolved) {
+                fn_stopFight = (ai_float_getter_t)find_method_addr_ns("FishAI", "FishAi", "get_StopFightProbability", 0);
+                fn_escape = (ai_float_getter_t)find_method_addr_ns("FishAI", "FishAi", "get_AllEscapesProbability", 0);
+                fn_maneuver = (ai_float_getter_t)find_method_addr_ns("FishAI", "FishAi", "get_AllManeuversProbability", 0);
+                viblog("[HUD] FishAi probability getters: stop=%p esc=%p mnvr=%p",
+                       (void*)fn_stopFight, (void*)fn_escape, (void*)fn_maneuver);
+                prob_resolved = 1;
+            }
+            if (fn_stopFight) d->stopFightProb = fn_stopFight(ai, NULL);
+            if (fn_escape) d->escapeProb = fn_escape(ai, NULL);
+            if (fn_maneuver) d->maneuverProb = fn_maneuver(ai, NULL);
+        }
+
+        // Debug log periodically
+        if (count % 100 == 0) {
+            void *caught = g_hud_fn.caughtFish ? g_hud_fn.caughtFish(thisptr, NULL) : NULL;
+            void *fish_obj = NULL;
+            if (caught && g_hud_fn.cf_getFish)
+                fish_obj = g_hud_fn.cf_getFish(caught, NULL);
+
+            viblog("[HUD-DBG] #%d slot=%d hooked=%d passive=%d big=%d huge=%d small=%d "
+                   "maxF=%.1f relF=%.2f appF=%.1f "
+                   "plrF=%.1f maxSpd=%.2f retreat=%.2f "
+                   "stop=%.3f esc=%.3f mnvr=%.3f "
+                   "bite=%.2f/%.2f shock=%d shake=%d taste=%d swim=%d water=%d",
+                   count, idx,
+                   d->isHooked, d->isPassive,
+                   d->isBig, d->isHuge, d->isSmall,
+                   d->maxForce, d->relativeForce, d->appliedForce,
+                   d->playerForce, d->fishMaxSpeed, d->retreatThreshold,
+                   d->stopFightProb, d->escapeProb, d->maneuverProb,
+                   d->biteTime, d->maxBiteTime,
+                   d->isShocked, d->isShaking,
+                   d->isTasting, d->isFishSwimming, d->isInWater);
+
+            if (fish_obj && g_hud_fn.om_getName) {
+                void *nameStr = g_hud_fn.om_getName(fish_obj, NULL);
+                char nbuf[128] = {0};
+                il2cpp_string_to_buf(nameStr, nbuf, sizeof(nbuf));
+                viblog("[HUD-DBG] Fish name='%s' nameStr=%p", nbuf, nameStr);
+            }
+        }
+
+        // Log state transitions
+        static char prev_ai_state[48] = {0};
+        int state_changed = (d->state != prev_state ||
+                            d->isHooked != prev_hooked ||
+                            d->isPassive != prev_passive ||
+                            strcmp(d->aiStateName, prev_ai_state) != 0);
+        if (state_changed) {
+            viblog("[STATE] %d->%d hooked=%d->%d passive=%d->%d AI=%s | "
+                   "force=%.1f/%.1f rel=%.2f taste=%d/%d striked=%d bite=%.1f/%.1f "
+                   "rod=%.1f line=%.2f reel=%.2f",
+                   prev_state, d->state,
+                   prev_hooked, d->isHooked,
+                   prev_passive, d->isPassive,
+                   d->aiStateName,
+                   g_fish_force, d->maxForce, d->relativeForce,
+                   d->countTastes, d->amountTastes, d->striked,
+                   d->biteTime, d->maxBiteTime,
+                   g_rod_force, g_line_tension, g_reel_speed);
+            prev_state = d->state;
+            prev_hooked = d->isHooked;
+            prev_passive = d->isPassive;
+            strncpy(prev_ai_state, d->aiStateName, sizeof(prev_ai_state) - 1);
+        }
+
+        // ObjectModel chain: CaughtFish → Fish → Name/Weight/etc.
+        if (g_hud_fn.caughtFish) {
+            void *caught = g_hud_fn.caughtFish(thisptr, NULL);
+            if (caught && g_hud_fn.cf_getFish) {
+                void *fish = g_hud_fn.cf_getFish(caught, NULL);
+                if (fish) {
+                    static void *prev_caught_fish = NULL;
+                    if (fish != prev_caught_fish) {
+                        prev_caught_fish = fish;
+                        viblog("[CAUGHT] CaughtFish appeared! caught=%p fish=%p", caught, fish);
+                    }
+                    d->hasFishInfo = 1;
+                    if (g_hud_fn.om_getName) {
+                        void *nameStr = g_hud_fn.om_getName(fish, NULL);
+                        il2cpp_string_to_buf(nameStr, d->name, sizeof(d->name));
+                    }
+                    if (g_hud_fn.om_getWeight)  d->weight = g_hud_fn.om_getWeight(fish, NULL);
+                    if (g_hud_fn.om_getLength)  d->fishLength = g_hud_fn.om_getLength(fish, NULL);
+                    if (g_hud_fn.om_isTrophy)   d->isTrophy = g_hud_fn.om_isTrophy(fish, NULL) & 0xFF;
+                    if (g_hud_fn.om_isUnique)   d->isUnique = g_hud_fn.om_isUnique(fish, NULL) & 0xFF;
+                    if (g_hud_fn.om_isMonster)  d->isMonster = g_hud_fn.om_isMonster(fish, NULL) & 0xFF;
+                    if (g_hud_fn.om_getStamina) d->stamina = g_hud_fn.om_getStamina(fish, NULL);
+                    if (g_hud_fn.om_getForce)   d->baseForce = g_hud_fn.om_getForce(fish, NULL);
+                    if (g_hud_fn.om_getSpeed)   d->speed = g_hud_fn.om_getSpeed(fish, NULL);
+                    if (fish == prev_caught_fish) {
+                        viblog("[CAUGHT] name='%s' weight=%.4f length=%.4f trophy=%d unique=%d monster=%d stamina=%.4f force=%.4f speed=%.4f",
+                               d->name, d->weight, d->fishLength,
+                               d->isTrophy, d->isUnique, d->isMonster,
+                               d->stamina, d->baseForce, d->speed);
+                    }
+                }
+            }
+        }
+
+        // Log full snapshot on new fish
+        if (is_new_fish) {
+            viblog("[NEW FISH] thisptr=%p slot=%d force=%.1f maxForce=%.1f minForce=%.1f relForce=%.2f "
+                   "hooked=%d passive=%d big=%d huge=%d small=%d "
+                   "rod=%.1f line=%.2f reel=%.2f reelFrc=%.1f headMass=%.2f",
+                   thisptr, idx, val, d->maxForce, d->minForce, d->relativeForce,
+                   d->isHooked, d->isPassive,
+                   d->isBig, d->isHuge, d->isSmall,
+                   g_rod_force, g_line_tension, g_reel_speed, g_reel_force, d->mass);
+        }
+
+        // Backward compat: sync to g_hud_data
+        g_hud_data = *d;
+    }
+
     return val;
 }
 
@@ -658,10 +1144,12 @@ static void hook_CalculateAppliedForce(void *thisptr, void *methodInfo) {
         float   applied     = *((float    *)((uint8_t *)thisptr + 0xb4));
 
         g_reel_force = applied;
+        if (applied > g_reel_force_peak) g_reel_force_peak = applied;
         // Normalize section: typically 0–3, sometimes up to 5
         float spd = is_reeling ? (speed_sect / 4.0f) : 0.0f;
         if (spd > 1.0f) spd = 1.0f;
         g_reel_speed = spd;
+        if (spd > g_reel_speed_peak) g_reel_speed_peak = spd;
 
         static int count = 0;
         count++;
@@ -698,7 +1186,7 @@ static void hook_TriggerHapticPulse(void *thisptr, void *methodInfo) {
 }
 
 // Helper: find method and return its native code address
-static void *find_method_addr_ns(const char *ns, const char *class_name, const char *method_name, int arg_count) {
+void *find_method_addr_ns(const char *ns, const char *class_name, const char *method_name, int arg_count) {
     Il2CppClass *klass = find_class(ns, class_name);
     if (!klass) return NULL;
     MethodInfo *m = api_class_get_method_from_name(klass, method_name, arg_count);
@@ -706,7 +1194,7 @@ static void *find_method_addr_ns(const char *ns, const char *class_name, const c
     return NULL;
 }
 
-static void *find_method_addr(const char *class_name, const char *method_name, int arg_count) {
+void *find_method_addr(const char *class_name, const char *method_name, int arg_count) {
     return find_method_addr_ns("", class_name, method_name, arg_count);
 }
 
@@ -779,6 +1267,63 @@ static void scan_classes_for_keywords(const char **keywords, int num_keywords) {
     viblog("[SCAN] Done: %d matching classes found", total_matches);
 }
 
+// Poll CaughtFish data for a slot after the fight ends.
+// Called from HUD timer (main thread) to read Fish Info that appears post-catch.
+// Wrapped in sigsetjmp guard because fish_ptr may be stale (GC'd by IL2CPP).
+int poll_caught_fish(int slot_idx) {
+    if (slot_idx < 0 || slot_idx >= MAX_FISH_SLOTS) return 0;
+    FishSlot *slot = &g_fish_slots[slot_idx];
+    if (!slot->fish_ptr) return 0;
+    if (slot->hud.hasFishInfo) return 1;  // already have it
+
+    // Guard against stale pointers: if any IL2CPP call crashes (SIGSEGV/SIGBUS),
+    // we recover here instead of taking down the whole process.
+    int sig = sigsetjmp(*safe_call_jmpbuf(), 1);
+    if (sig != 0) {
+        // Caught a crash — pointer was stale
+        viblog("[CAUGHT] poll_caught_fish: caught signal %d on slot #%d (fish_ptr=%p) — marking stale",
+               sig, slot_idx, slot->fish_ptr);
+        slot->fish_ptr = NULL;
+        slot->used = 0;
+        slot->active = 0;
+        return 0;
+    }
+    safe_call_set_active(1);
+
+    int result = 0;
+
+    if (!g_hud_fn.caughtFish) goto done;
+    void *caught = g_hud_fn.caughtFish(slot->fish_ptr, NULL);
+    if (!caught) goto done;
+
+    if (!g_hud_fn.cf_getFish) goto done;
+    void *fish = g_hud_fn.cf_getFish(caught, NULL);
+    if (!fish) goto done;
+
+    FishHUDData *d = &slot->hud;
+    d->hasFishInfo = 1;
+    if (g_hud_fn.om_getName) {
+        void *nameStr = g_hud_fn.om_getName(fish, NULL);
+        il2cpp_string_to_buf(nameStr, d->name, sizeof(d->name));
+    }
+    if (g_hud_fn.om_getWeight)  d->weight = g_hud_fn.om_getWeight(fish, NULL);
+    if (g_hud_fn.om_getLength)  d->fishLength = g_hud_fn.om_getLength(fish, NULL);
+    if (g_hud_fn.om_isTrophy)   d->isTrophy = g_hud_fn.om_isTrophy(fish, NULL) & 0xFF;
+    if (g_hud_fn.om_isUnique)   d->isUnique = g_hud_fn.om_isUnique(fish, NULL) & 0xFF;
+    if (g_hud_fn.om_isMonster)  d->isMonster = g_hud_fn.om_isMonster(fish, NULL) & 0xFF;
+    if (g_hud_fn.om_getStamina) d->stamina = g_hud_fn.om_getStamina(fish, NULL);
+    if (g_hud_fn.om_getForce)   d->baseForce = g_hud_fn.om_getForce(fish, NULL);
+    if (g_hud_fn.om_getSpeed)   d->speed = g_hud_fn.om_getSpeed(fish, NULL);
+
+    viblog("[CAUGHT] Fish Info from HUD poll: '%s' weight=%.3f len=%.1f trophy=%d unique=%d monster=%d",
+           d->name, d->weight, d->fishLength, d->isTrophy, d->isUnique, d->isMonster);
+    result = 1;
+
+done:
+    safe_call_set_active(0);
+    return result;
+}
+
 static void install_fishing_hooks(void) {
     viblog("[FISH] --- Installing fishing hooks (inline) ---");
     int hooked = 0;
@@ -849,6 +1394,18 @@ static void install_fishing_hooks(void) {
     if (!orig_TriggerHapticPulse)
         viblog("[FISH] TriggerHapticPulseOnRod not found in any class");
 
+    // FishAi.Update — captures bite phase data (isTasting, biteTime, maxBiteTime, AI state)
+    addr = find_method_addr_ns("FishAI", "FishAi", "Update", 1);
+    if (addr) {
+        if (install_inline_hook(addr, (void *)hook_FishAiUpdate,
+                                (void **)&orig_FishAiUpdate) == 0) {
+            viblog("[BITE] Hooked FishAi.Update @ %p", addr);
+            hooked++;
+        }
+    } else {
+        viblog("[BITE] FishAi.Update not found");
+    }
+
     // Reel1stBehaviour.CalculateAppliedForce — non-virtual, starts with STP frame
     // Reads IsReeling/speedSection/AppliedForce fields from thisptr after calling original.
     addr = find_method_addr("Reel1stBehaviour", "CalculateAppliedForce", 0);
@@ -864,4 +1421,53 @@ static void install_fishing_hooks(void) {
 
     g_fishing_hooks_active = hooked;
     viblog("[FISH] --- %d fishing hooks installed ---", hooked);
+
+    // Resolve HUD getter method pointers (not hooked, just called)
+    viblog("[HUD] Resolving fish getter methods...");
+    int hud_resolved = 0;
+    #define RESOLVE_HUD(dst, ns, cls, meth) do { \
+        dst = (__typeof__(dst))find_method_addr_ns(ns, cls, meth, 0); \
+        if (dst) hud_resolved++; \
+        else viblog("[HUD] NOT FOUND: %s.%s.%s", ns, cls, meth); \
+    } while(0)
+
+    RESOLVE_HUD(g_hud_fn.maxForce,       "FishAI", "Fish1stBehaviour", "get_MaxForce");
+    RESOLVE_HUD(g_hud_fn.relativeForce,  "FishAI", "Fish1stBehaviour", "get_CurrentRelativeForce");
+    RESOLVE_HUD(g_hud_fn.appliedForce,   "FishAI", "Fish1stBehaviour", "get_AppliedForce");
+    RESOLVE_HUD(g_hud_fn.distanceToTackle,"FishAI","Fish1stBehaviour", "get_DistanceToTackle");
+    RESOLVE_HUD(g_hud_fn.isBig,          "FishAI", "Fish1stBehaviour", "get_IsBig");
+    RESOLVE_HUD(g_hud_fn.isHuge,         "FishAI", "Fish1stBehaviour", "get_IsHuge");
+    RESOLVE_HUD(g_hud_fn.isSmall,        "FishAI", "Fish1stBehaviour", "get_IsSmall");
+    RESOLVE_HUD(g_hud_fn.isHooked,       "FishAI", "Fish1stBehaviour", "get_isHooked");
+    RESOLVE_HUD(g_hud_fn.isPassive,      "FishAI", "Fish1stBehaviour", "get_IsPassive");
+    RESOLVE_HUD(g_hud_fn.state,          "FishAI", "Fish1stBehaviour", "get_State");
+    // These are on Fish1stBehaviour directly (found by api_class_get_method_from_name):
+    RESOLVE_HUD(g_hud_fn.retreatThreshold,"FishAI","Fish1stBehaviour", "get_RetreatThreshold");
+    RESOLVE_HUD(g_hud_fn.biteTime,       "FishAI", "Fish1stBehaviour", "get_BiteTime");
+    RESOLVE_HUD(g_hud_fn.isTasting,      "FishAI", "Fish1stBehaviour", "get_IsTasting");
+    RESOLVE_HUD(g_hud_fn.isInWater,      "FishAI", "Fish1stBehaviour", "get_IsInWater");
+    // NOTE: get_CurrentMaxSpeed, get_MinForce, get_PlayerForce, get_StopFightProbability,
+    // get_AllEscapesProbability, get_AllManeuversProbability, get_IsShocked, get_IsShaking,
+    // get_IsFishSwiming, get_MaxBiteTime — these belong to FishAi sub-object (offset 0x1a0).
+    // Read via direct field access in hook_GetCurrentForce instead.
+    RESOLVE_HUD(g_hud_fn.caughtFish,     "FishAI", "Fish1stBehaviour", "get_CaughtFish");
+    // Try Fish1stBehaviour first (same class as thisptr), then FishBehaviour fallback
+    g_hud_fn.mass = (hud_ff_t)find_method_addr_ns("FishAI", "Fish1stBehaviour", "get_HeadMass", 0);
+    if (g_hud_fn.mass) { viblog("[HUD] Using Fish1stBehaviour.get_HeadMass for mass"); hud_resolved++; }
+    else { viblog("[HUD] get_HeadMass not found"); }
+    g_hud_fn.fbLength = NULL;  // No reliable length getter on Fish1stBehaviour
+    // ObjectModel.CaughtFish
+    RESOLVE_HUD(g_hud_fn.cf_getFish,     "ObjectModel", "CaughtFish", "get_Fish");
+    // ObjectModel.Fish
+    RESOLVE_HUD(g_hud_fn.om_getName,     "ObjectModel", "Fish", "get_Name");
+    RESOLVE_HUD(g_hud_fn.om_getWeight,   "ObjectModel", "Fish", "get_Weight");
+    RESOLVE_HUD(g_hud_fn.om_getLength,   "ObjectModel", "Fish", "get_Length");
+    RESOLVE_HUD(g_hud_fn.om_isTrophy,    "ObjectModel", "Fish", "get_IsTrophy");
+    RESOLVE_HUD(g_hud_fn.om_isUnique,    "ObjectModel", "Fish", "get_IsUnique");
+    RESOLVE_HUD(g_hud_fn.om_isMonster,   "ObjectModel", "Fish", "get_IsMonster");
+    RESOLVE_HUD(g_hud_fn.om_getStamina,  "ObjectModel", "Fish", "get_Stamina");
+    RESOLVE_HUD(g_hud_fn.om_getForce,    "ObjectModel", "Fish", "get_Force");
+    RESOLVE_HUD(g_hud_fn.om_getSpeed,    "ObjectModel", "Fish", "get_Speed");
+    #undef RESOLVE_HUD
+    viblog("[HUD] Resolved %d/38 fish getter methods", hud_resolved);
 }

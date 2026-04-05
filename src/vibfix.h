@@ -86,7 +86,17 @@ void viblog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 void find_install_dir(void);
 void load_config(void);
+void install_crash_handler(void);
 float clampf(float v);
+
+// Safe memory access (sigsetjmp guard for calling IL2CPP with potentially stale pointers)
+#include <setjmp.h>
+int safe_call_active(void);
+sigjmp_buf *safe_call_jmpbuf(void);
+void safe_call_set_active(int v);
+
+// Usage: if (sigsetjmp(*safe_call_jmpbuf(), 1) == 0) { safe_call_set_active(1); ...; safe_call_set_active(0); }
+//        else { /* caught SIGSEGV/SIGBUS — pointer was stale */ }
 
 // ============ IL2CPP API ============
 
@@ -178,14 +188,97 @@ extern int g_hid_ready;
 // ============ Fishing State (from inline hooks) ============
 
 extern float g_line_tension;
+extern float g_line_tension_peak;  // peak-hold: max since last decay (for multi-rod)
 extern float g_fish_force;
 extern float g_rod_force;
 extern float g_reel_speed;   // Reel1stBehaviour.get_CurrentRelativeSpeed (0–1, >0 when reeling)
-extern float g_reel_force;   // Reel1stBehaviour.get_CurrentForce (load on reel)
+extern float g_reel_speed_peak;    // peak-hold: max since last decay (for multi-rod)
+extern float g_reel_force;
+extern float g_reel_force_peak;    // peak-hold: max since last decay (for multi-rod)
 extern int   g_fishing_hooks_active;
 extern volatile uint32_t g_fish_force_tick;  // increments each time get_CurrentForce is called
 extern volatile int g_shutting_down;         // set on process exit to stop threads
 extern volatile int g_vibration_disabled;    // set by DSBL ioctl, cleared by ENBL
+
+// ============ Fish HUD Data ============
+
+typedef struct {
+    // From Fish1stBehaviour (updated in hook_GetCurrentForce)
+    float maxForce;
+    float relativeForce;
+    float appliedForce;
+    float distanceToTackle;
+    float mass;
+    float fishBehaviourLength;
+    int   state;
+    int   isHooked;
+    int   isBig;
+    int   isHuge;
+    int   isSmall;
+    int   isPassive;
+    // Extended Fish1stBehaviour data
+    float fishVelocity;       // get_CurrentVelocity (magnitude)
+    float fishMaxSpeed;       // get_CurrentMaxSpeed
+    float minForce;           // get_MinForce
+    float playerForce;        // get_PlayerForce
+    float stopFightProb;      // get_StopFightProbability
+    float escapeProb;         // get_AllEscapesProbability
+    float maneuverProb;       // get_AllManeuversProbability
+    float retreatThreshold;   // get_RetreatThreshold
+    float biteTime;           // get_BiteTime
+    float maxBiteTime;        // get_MaxBiteTime
+    int   isShocked;          // get_IsShocked
+    int   isShaking;          // get_IsShaking
+    int   isTasting;          // get_IsTasting
+    int   isFishSwimming;     // get_IsFishSwiming
+    int   isInWater;          // get_IsInWater
+    // FishAi FSM state & bite mechanics
+    char  aiStateName[48];    // Current AI state class name (e.g. "FishAIBite")
+    int   striked;            // FishAi.striked — strike was performed
+    int   endOfTaste;         // FishAi.endOfTaste — taste period ended
+    int   countTastes;        // FishAi.CountTastes — current taste count
+    int   amountTastes;       // FishAi.AmountTastes — total tastes before retreat
+    // From ObjectModel.Fish (via CaughtFish chain)
+    int   hasFishInfo;
+    char  name[128];
+    float weight;
+    float fishLength;
+    int   isTrophy;
+    int   isUnique;
+    int   isMonster;
+    float stamina;
+    float baseForce;
+    float speed;
+} FishHUDData;
+
+extern FishHUDData g_hud_data;
+extern volatile void *g_fish_thisptr;
+
+// ============ Multi-Fish Slots ============
+
+#define MAX_FISH_SLOTS 8
+
+typedef struct {
+    FishHUDData  hud;              // full HUD data for this fish
+    void        *fish_ptr;         // Fish1stBehaviour pointer (owner)
+    void        *ai_ptr;           // FishAi pointer (key for lookup)
+    float        current_force;    // fish force (from ai+0x88 for all, getter for active)
+    uint32_t     last_update_tick; // monotonic tick from FishAi.Update
+    int          active;           // 1 = player is holding this rod
+    int          used;             // 0 = empty slot
+} FishSlot;
+
+extern FishSlot g_fish_slots[MAX_FISH_SLOTS];
+extern int g_active_slot;
+extern volatile uint32_t g_slot_tick;
+
+// Poll CaughtFish data for a slot (called from HUD timer after fight ends)
+// Returns 1 if Fish Info was successfully read, 0 otherwise.
+int poll_caught_fish(int slot_idx);
+
+void *find_method_addr(const char *class_name, const char *method_name, int arg_count);
+void *find_method_addr_ns(const char *ns, const char *class_name, const char *method_name, int arg_count);
+void initHUD(void);
 
 // ============ Output ============
 

@@ -1,6 +1,8 @@
-// vibfix_config.c — Install dir detection, configuration, logging
+// vibfix_config.c — Install dir detection, configuration, logging, crash handler
 
 #include "vibfix.h"
+#include <execinfo.h>
+#include <signal.h>
 
 // ============ Install Directory Detection ============
 
@@ -94,6 +96,112 @@ void viblog(const char *fmt, ...) {
         va_end(ap);
     }
     pthread_mutex_unlock(&g_logmutex);
+}
+
+// ============ Crash Handler ============
+
+static const char *signal_name(int sig) {
+    switch (sig) {
+        case SIGSEGV: return "SIGSEGV";
+        case SIGBUS:  return "SIGBUS";
+        case SIGILL:  return "SIGILL";
+        case SIGABRT: return "SIGABRT";
+        case SIGFPE:  return "SIGFPE";
+        default:      return "UNKNOWN";
+    }
+}
+
+// --- Safe memory access: sigsetjmp/siglongjmp guard ---
+// When g_safe_jmp_active is set, SIGSEGV/SIGBUS in poll_caught_fish
+// will longjmp back instead of crashing the process.
+static __thread sigjmp_buf g_safe_jmp;
+static __thread volatile int g_safe_jmp_active = 0;
+
+static struct sigaction g_prev_sigsegv;
+static struct sigaction g_prev_sigbus;
+
+static void crash_handler(int sig, siginfo_t *info, void *ucontext) {
+    // If we're inside a safe_call block, recover instead of crashing
+    if (g_safe_jmp_active) {
+        g_safe_jmp_active = 0;
+        siglongjmp(g_safe_jmp, sig);
+        // not reached
+    }
+
+    // All I/O here must be async-signal-safe: write() only, no fprintf/malloc
+    int fd = g_logfile ? fileno(g_logfile) : -1;
+    if (fd < 0) goto reraise;
+
+    // Write crash header
+    char buf[512];
+    int len = snprintf(buf, sizeof(buf),
+        "\n[CRASH] Signal %d (%s) at address %p\n",
+        sig, signal_name(sig), info->si_addr);
+    write(fd, buf, len);
+
+    // Register context (ARM64)
+#if defined(__aarch64__)
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    if (uc) {
+        uintptr_t pc = uc->uc_mcontext->__ss.__pc;
+        uintptr_t lr = uc->uc_mcontext->__ss.__lr;
+        uintptr_t fp = uc->uc_mcontext->__ss.__fp;
+        uintptr_t sp = uc->uc_mcontext->__ss.__sp;
+        len = snprintf(buf, sizeof(buf),
+            "[CRASH] PC=0x%lx LR=0x%lx FP=0x%lx SP=0x%lx\n",
+            (unsigned long)pc, (unsigned long)lr,
+            (unsigned long)fp, (unsigned long)sp);
+        write(fd, buf, len);
+
+        // Dump x0-x28
+        for (int i = 0; i < 29; i += 4) {
+            len = snprintf(buf, sizeof(buf),
+                "[CRASH] x%d=0x%lx x%d=0x%lx x%d=0x%lx x%d=0x%lx\n",
+                i,   (unsigned long)uc->uc_mcontext->__ss.__x[i],
+                i+1, (unsigned long)uc->uc_mcontext->__ss.__x[i+1],
+                i+2, (unsigned long)uc->uc_mcontext->__ss.__x[i+2],
+                i+3, (unsigned long)uc->uc_mcontext->__ss.__x[i+3]);
+            write(fd, buf, len);
+        }
+    }
+#endif
+
+    // Backtrace (backtrace() is not strictly async-signal-safe but works in practice on macOS)
+    void *bt[64];
+    int n = backtrace(bt, 64);
+    if (n > 0) {
+        write(fd, "[CRASH] Backtrace:\n", 19);
+        backtrace_symbols_fd(bt, n, fd);
+    }
+
+    // Log fishing state for context
+    len = snprintf(buf, sizeof(buf),
+        "[CRASH] State: fish_force=%.1f rod_force=%.1f tension=%.1f "
+        "fish_ptr=%p slot=%d hooks_active=%d\n",
+        g_fish_force, g_rod_force, g_line_tension,
+        (void *)g_fish_thisptr, g_active_slot, g_fishing_hooks_active);
+    write(fd, buf, len);
+
+reraise:
+    // Re-raise to get default crash behavior (core dump / crash report)
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+int safe_call_active(void) { return g_safe_jmp_active; }
+sigjmp_buf *safe_call_jmpbuf(void) { return &g_safe_jmp; }
+void safe_call_set_active(int v) { g_safe_jmp_active = v; }
+
+void install_crash_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, &g_prev_sigsegv);
+    sigaction(SIGBUS,  &sa, &g_prev_sigbus);
+    sigaction(SIGILL,  &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGFPE,  &sa, NULL);
 }
 
 // ============ Config Loading ============
